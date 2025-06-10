@@ -31,6 +31,15 @@ db.connect((err) => {
 app.use(cors());
 app.use(bodyParser.json());
 
+const pickerTableName = {
+  ENGINEER: "engineers",
+  MOC: "moc",
+  ASSET: "assets_type",
+  PRODUCT: "products",
+  FAULT: "faults",
+  STATUS: "job_status",
+};
+
 // Middleware to verify JWT for all authenticated routes
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers["authorization"];
@@ -202,6 +211,8 @@ app.post("/logout", (req, res) => {
   });
 });
 
+/* Get data queries code */
+
 /* Get jobID */
 app.get("/jobID", authenticateToken, (req, res) => {
   const startDate = startOfMonth(new Date());
@@ -224,8 +235,54 @@ app.get("/jobID", authenticateToken, (req, res) => {
       return res.status(500).json({ error: "Failed to execute query" });
     }
 
-    res.json(results.length ? results : []); // Return result or empty array
+    // Check if results exist and respond accordingly
+    if (results.length > 0) {
+      res.json({ JOB_ID: results[0].JOB_ID });
+    } else {
+      res.json({});
+    }
   });
+});
+
+/* Get engineerPicker, mocPicker, assetsPicker, productPicker, faultPicker, jobStatusPicker */
+app.get("/jobSheetPickers", authenticateToken, (req, res) => {
+  // Queries to fetch data from each table
+  const queries = {
+    engineers: "SELECT NAME FROM engineers",
+    moc: "SELECT NAME FROM moc",
+    assets_type: "SELECT NAME FROM assets_type",
+    products: "SELECT NAME FROM products",
+    faults: "SELECT NAME FROM faults",
+    job_status: "SELECT NAME FROM job_status",
+  };
+
+  // Execute all queries concurrently using Promise.all
+  const queryPromises = Object.entries(queries).map(([key, query]) => {
+    return new Promise((resolve, reject) => {
+      db.query(query, (err, results) => {
+        if (err) {
+          reject({ key, error: err });
+        } else {
+          resolve({ key, data: results.map((row) => row.NAME) }); // Map results to array of names
+        }
+      });
+    });
+  });
+
+  Promise.all(queryPromises)
+    .then((results) => {
+      // Combine results into the desired format
+      const responseData = results.reduce((acc, result) => {
+        acc[result.key] = result.data;
+        return acc;
+      }, {});
+
+      res.json(responseData);
+    })
+    .catch((err) => {
+      console.error("Error fetching data:", err);
+      res.status(500).json({ error: "Failed to fetch data" });
+    });
 });
 
 /* Get printData */
@@ -282,12 +339,22 @@ app.get("/allData", authenticateToken, (req, res) => {
   const queryParams = [convertedInDateFrom, convertedInDateTo];
 
   // If status is not "all", add the condition for JOB_STATUS
-  if (status !== "All") {
+  if (status !== "All" && status !== "Un Purchased" && status !== "Purchased") {
     query += ` AND JOB_STATUS = ?`;
     queryParams.push(status);
   }
 
-  query += ` ORDER BY IN_DATE ASC`;
+  if (status === "Un Purchased") {
+    query += ` AND PURCHASED = 'NO'`;
+    queryParams.push(status);
+  }
+
+  if (status === "Purchased") {
+    query += ` AND PURCHASED = 'YES'`;
+    queryParams.push(status);
+  }
+
+  query += ` ORDER BY ID DESC`;
 
   // Execute the query
   db.query(query, queryParams, (err, results) => {
@@ -312,6 +379,7 @@ app.get("/allData", authenticateToken, (req, res) => {
   });
 });
 
+/* Get userList */
 app.get("/userList", authenticateToken, (req, res) => {
   // Select all users from the user table
   const query = "SELECT * FROM user";
@@ -327,6 +395,37 @@ app.get("/userList", authenticateToken, (req, res) => {
   });
 });
 
+/* Get modify Pickers */
+app.get("/pickersList", authenticateToken, (req, res) => {
+  const { menuSelected } = req.query;
+
+  // Validate menuSelected
+  if (!pickerTableName[menuSelected]) {
+    return res.status(400).json({ error: "Invalid menuSelected value" });
+  }
+
+  // Construct the query
+  const query = `SELECT NAME FROM ${pickerTableName[menuSelected]}`;
+
+  // Execute the query
+  db.query(query, (err, results) => {
+    if (err) {
+      console.error("Database query error:", err);
+      return res.status(500).json({ error: "Internal Server Error" });
+    }
+
+    // If no results found
+    if (results.length === 0) {
+      return res.status(404).json({ message: "No data found" });
+    }
+
+    // Send the results as an array of names
+    const names = results.map((row) => row.NAME);
+    res.status(200).json(names);
+  });
+});
+
+/* Get insight */
 app.get("/insight", authenticateToken, (req, res) => {
   const { inDateFrom, inDateTo, filter } = req.query;
 
@@ -360,7 +459,7 @@ app.get("/insight", authenticateToken, (req, res) => {
   });
 });
 
-/* Get allData */
+/* Get data queries code */
 
 /* Insert data into job_details and backup */
 app.post("/insert", authenticateToken, (req, res) => {
@@ -459,7 +558,62 @@ app.post("/insert", authenticateToken, (req, res) => {
             });
           }
 
-          res.json({ message: "Record inserted successfully" });
+          res.json({ message: "Job details inserted successfully" });
+        });
+      });
+    });
+  });
+});
+
+/* insert picker */
+app.post("/insertPicker", authenticateToken, (req, res) => {
+  const { menuSelected, pickerName } = req.body;
+  const checkPickerQuery = `SELECT 1 FROM ${pickerTableName[menuSelected]} WHERE NAME = ? LIMIT 1`;
+  const insertQuery = `INSERT INTO ${pickerTableName[menuSelected]} (NAME) VALUES (?)`;
+
+  db.beginTransaction((err) => {
+    if (err) {
+      console.error("Transaction Error:", err);
+      return res.status(500).json({ error: "Transaction failed to start" });
+    }
+
+    // Check if picker name already exists
+    db.query(checkPickerQuery, [pickerName], (err, results) => {
+      if (err) {
+        return db.rollback(() => {
+          console.error("Picker Name Check Error:", err);
+          return res.status(500).json({ error: "Error checking picker name" });
+        });
+      }
+
+      if (results.length > 0) {
+        return db.rollback(() => {
+          res.status(400).json({ error: "Picker name already exists" });
+        });
+      }
+
+      // Insert new picker name
+      db.query(insertQuery, [pickerName], (err) => {
+        if (err) {
+          return db.rollback(() => {
+            console.error("Insert Error:", err);
+            return res
+              .status(500)
+              .json({ error: "Error inserting picker name" });
+          });
+        }
+
+        db.commit((err) => {
+          if (err) {
+            return db.rollback(() => {
+              console.error("Commit Error:", err);
+              return res
+                .status(500)
+                .json({ error: "Transaction commit failed" });
+            });
+          }
+
+          res.json({ message: "Picker details inserted successfully" });
         });
       });
     });
@@ -567,6 +721,7 @@ app.post("/createUser", authenticateToken, (req, res) => {
 /* update query */
 app.post("/editJob", authenticateToken, (req, res) => {
   const {
+    oldJobID,
     jobID,
     customerName,
     mobileNo,
@@ -574,34 +729,38 @@ app.post("/editJob", authenticateToken, (req, res) => {
     address,
     engineer,
     moc,
+    inDate,
+    outDate,
     assets,
     productMake,
-    description,
     serialNo,
+    description,
     faultType,
     faultDesc,
     jobStatus,
-    amount,
     solutionProvided,
-    inDate,
-    outDate,
+    amount,
     purchaseAmount,
+    purchasedStatus,
     name,
   } = req.body;
 
   const convertedInDate = convertDateToSQL(inDate);
   const convertedOutDate = convertDateToSQL(outDate);
 
+  const checkJobIDQuery = "SELECT 1 FROM job_details WHERE JOB_ID = ? LIMIT 1";
+
   const updateQuery = `
     UPDATE job_details 
-    SET NAME = ?, MOBILE = ?, EMAIL = ?, ADDRESS = ?, ENGINEER = ?, MOC = ?, 
+    SET JOB_ID = ?, NAME = ?, MOBILE = ?, EMAIL = ?, ADDRESS = ?, ENGINEER = ?, MOC = ?, 
         IN_DATE = ?, OUT_DATE = ?, ASSETS = ?, PRODUCT_MAKE = ?, DESCRIPTION = ?, 
         SERIAL_NO = ?, FAULT_TYPE = ?, FAULT_DESC = ?, JOB_STATUS = ?, AMOUNT = ?, 
-        SOLUTION_PROVIDED = ?, PURCHASE_AMOUNT=?, LAST_MODIFIED=?
+        SOLUTION_PROVIDED = ?, PURCHASE_AMOUNT=?, PURCHASED=?, LAST_MODIFIED=? 
     WHERE JOB_ID = ?
   `;
 
   const commonData = [
+    jobID,
     customerName,
     mobileNo,
     email,
@@ -620,8 +779,9 @@ app.post("/editJob", authenticateToken, (req, res) => {
     amount,
     solutionProvided,
     purchaseAmount,
+    purchasedStatus,
     name,
-    jobID, // For the WHERE clause
+    oldJobID, // For the WHERE clause
   ];
 
   // Start transaction
@@ -631,29 +791,43 @@ app.post("/editJob", authenticateToken, (req, res) => {
       return res.status(500).json({ error: "Failed to start transaction" });
     }
 
-    // Update the job_details table
-    db.query(updateQuery, commonData, (err) => {
+    // Check if the new jobID already exists in the database
+    db.query(checkJobIDQuery, [jobID], (err, results) => {
       if (err) {
         return db.rollback(() => {
-          console.error("Error updating job_details:", err);
-          return res
-            .status(500)
-            .json({ error: "Failed to update record in job_details" });
+          console.error("Error checking jobID:", err);
+          return res.status(500).json({ error: "Failed to check job ID" });
         });
       }
 
-      // Commit the transaction
-      db.commit((err) => {
+      if (results.length > 0) {
+        return res.status(400).json({ error: "Job ID already exists" });
+      }
+
+      // Update the job_details table
+      db.query(updateQuery, commonData, (err) => {
         if (err) {
           return db.rollback(() => {
-            console.error("Error committing transaction:", err);
+            console.error("Error updating job_details:", err);
             return res
               .status(500)
-              .json({ error: "Failed to commit transaction" });
+              .json({ error: "Failed to update record in job_details" });
           });
         }
 
-        res.json({ message: "Record updated successfully" });
+        // Commit the transaction
+        db.commit((err) => {
+          if (err) {
+            return db.rollback(() => {
+              console.error("Error committing transaction:", err);
+              return res
+                .status(500)
+                .json({ error: "Failed to commit transaction" });
+            });
+          }
+
+          res.json({ message: "Record updated successfully" });
+        });
       });
     });
   });
@@ -850,6 +1024,76 @@ app.post("/resetPassword", authenticateToken, async (req, res) => {
   }
 });
 
+app.post("/editPicker", authenticateToken, (req, res) => {
+  const { menuSelected, oldPicker, newPicker, position } = req.body;
+
+  if (position !== "ADMIN") {
+    return res.status(403).json({ message: "Unauthorized access" });
+  }
+
+  const checkPickerExistsQuery = `SELECT 1 FROM ${pickerTableName[menuSelected]} WHERE NAME = ? LIMIT 1`;
+  const updateQuery = `
+    UPDATE ${pickerTableName[menuSelected]} 
+    SET NAME = ? 
+    WHERE NAME = ?
+  `;
+
+  db.beginTransaction((err) => {
+    if (err) {
+      console.error("Error starting transaction:", err);
+      return res.status(500).json({ error: "Failed to start transaction" });
+    }
+
+    // Check if the new picker name already exists in the table
+    db.query(checkPickerExistsQuery, [newPicker], (err, results) => {
+      if (err) {
+        return db.rollback(() => {
+          console.error("Error checking picker existence:", err);
+          return res.status(500).json({ error: "Failed to check picker name" });
+        });
+      }
+
+      if (results.length > 0) {
+        return res
+          .status(400)
+          .json({ error: "New picker name already exists" });
+      }
+
+      // Perform the update
+      db.query(updateQuery, [newPicker, oldPicker], (err, result) => {
+        if (err) {
+          return db.rollback(() => {
+            console.error("Error updating picker name:", err);
+            return res
+              .status(500)
+              .json({ error: "Failed to update picker name" });
+          });
+        }
+
+        if (result.affectedRows === 0) {
+          return db.rollback(() => {
+            return res.status(404).json({ error: "Old picker name not found" });
+          });
+        }
+
+        // Commit the transaction
+        db.commit((err) => {
+          if (err) {
+            return db.rollback(() => {
+              console.error("Error committing transaction:", err);
+              return res
+                .status(500)
+                .json({ error: "Failed to commit transaction" });
+            });
+          }
+
+          res.json({ message: "Picker name updated successfully" });
+        });
+      });
+    });
+  });
+});
+
 /* Delete Queries */
 app.post("/deleteUser", authenticateToken, async (req, res) => {
   const { userName, position } = req.body;
@@ -916,10 +1160,53 @@ app.post("/deleteJob", authenticateToken, async (req, res) => {
 
       // Check if any rows were affected
       if (result.affectedRows === 0) {
-        return res.status(404).json({ message: "job not found" });
+        return res.status(404).json({ message: "Job not found." });
       }
 
       res.status(200).json({ message: `Job '${JobID}' deleted successfully.` });
+    });
+  } catch (error) {
+    console.error("Unexpected error:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+app.post("/deletePicker", authenticateToken, async (req, res) => {
+  const { menuSelected, pickerName, position } = req.body;
+
+  // Validate admin access
+  if (position !== "ADMIN") {
+    return res.status(403).json({ message: "Unauthorized access" });
+  }
+
+  // Check if userName is provided
+  if (!menuSelected) {
+    return res.status(400).json({ message: "Menu is required" });
+  }
+
+  if (!pickerName) {
+    return res.status(400).json({ message: "Picker is required" });
+  }
+
+  try {
+    // Prepare the delete query
+    const deleteQuery = `DELETE FROM ${pickerTableName[menuSelected]} WHERE NAME = ?`;
+
+    // Execute the delete query
+    db.query(deleteQuery, [pickerName], (err, result) => {
+      if (err) {
+        console.error("Error deleting user:", err);
+        return res.status(500).json({ message: "Error deleting picker" });
+      }
+
+      // Check if any rows were affected
+      if (result.affectedRows === 0) {
+        return res.status(404).json({ message: "picker not found" });
+      }
+
+      res
+        .status(200)
+        .json({ message: `Picker '${pickerName}' deleted successfully.` });
     });
   } catch (error) {
     console.error("Unexpected error:", error);
