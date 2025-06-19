@@ -7,38 +7,38 @@ import { format, startOfMonth, endOfMonth, parse } from "date-fns";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import moment from "moment-timezone";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import { body, validationResult } from "express-validator";
+import mysql2 from "mysql2";
+import { pickerTableName } from "./constants.js";
 
 dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 3005;
 
-const db = mysql.createConnection({
+const db = mysql2.createPool({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
 });
 
-db.connect((err) => {
+db.getConnection((err, connection) => {
   if (err) {
     console.error("Database connection failed:", err);
   } else {
     console.log("Connected to the database");
+    connection.release();
   }
 });
 
 app.use(cors());
-app.use(bodyParser.json());
-
-const pickerTableName = {
-  ENGINEER: "engineers",
-  MOC: "moc",
-  ASSET: "assets_type",
-  PRODUCT: "products",
-  FAULT: "faults",
-  STATUS: "job_status",
-};
+app.use(bodyParser.json({ limit: "1mb" }));
 
 // Middleware to verify JWT for all authenticated routes
 const authenticateToken = (req, res, next) => {
@@ -114,89 +114,134 @@ const covertDateFormate = (dateInput) => {
   }
 }; */
 
-app.post("/login", (req, res) => {
-  const { USERNAME, PASSWORD } = req.body;
+// Add rate limiting (e.g., 100 requests per 15 minutes per IP)
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use(limiter);
 
-  if (!USERNAME || !PASSWORD) {
-    return res
-      .status(400)
-      .json({ success: false, message: "Username and password are required" });
-  }
+app.post(
+  "/login",
+  [
+    body("USERNAME").isString().trim().notEmpty(),
+    body("PASSWORD").isString().notEmpty(),
+  ],
+  (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ success: false, errors: errors.array() });
+    }
 
-  const queryAdmin = "SELECT * FROM admin WHERE USERNAME = ?";
-  const queryUser = "SELECT * FROM user WHERE USERNAME = ?";
+    const { USERNAME, PASSWORD } = req.body;
 
-  const handleLogin = (user, tableName) => {
-    bcrypt.compare(
-      PASSWORD + process.env.SALT_KEY,
-      user.PASSWORD,
-      (bcryptErr, bcryptResult) => {
-        if (bcryptErr) {
-          console.error("[LOGIN] Bcrypt error:", bcryptErr);
-          return res
-            .status(500)
-            .json({ success: false, message: "Internal server error" });
-        }
-        if (!bcryptResult) {
-          return res
-            .status(401)
-            .json({ success: false, message: "Password is incorrect" });
-        }
-        const currentDateTime = moment()
-          .tz("Asia/Kolkata")
-          .format("YYYY-MM-DD HH:mm:ss");
-        const updateQuery = `UPDATE ${tableName} SET STATUS = 'ACTIVATED', LAST_LOGIN = ? WHERE USERNAME = ?`;
-        db.query(updateQuery, [currentDateTime, USERNAME], (updateErr) => {
-          if (updateErr) {
-            console.error("[LOGIN] Database update error:", updateErr);
+    if (!USERNAME || !PASSWORD) {
+      return res.status(400).json({
+        success: false,
+        message: "Username and password are required",
+      });
+    }
+
+    const queryAdmin = "SELECT * FROM admin WHERE USERNAME = ?";
+    const queryUser = "SELECT * FROM user WHERE USERNAME = ?";
+
+    const handleLogin = (user, tableName) => {
+      bcrypt.compare(
+        PASSWORD + process.env.SALT_KEY,
+        user.PASSWORD,
+        (bcryptErr, bcryptResult) => {
+          if (bcryptErr) {
+            console.error("[LOGIN] Bcrypt error:", bcryptErr);
             return res
               .status(500)
               .json({ success: false, message: "Internal server error" });
           }
-          const jwtToken = jwt.sign({ USERNAME }, process.env.JWT_SECRET, {
-            expiresIn: "90m",
+          if (!bcryptResult) {
+            return res
+              .status(401)
+              .json({ success: false, message: "Password is incorrect" });
+          }
+          const currentDateTime = moment()
+            .tz("Asia/Kolkata")
+            .format("YYYY-MM-DD HH:mm:ss");
+          const updateQuery = `UPDATE ${tableName} SET STATUS = 'ACTIVATED', LAST_LOGIN = ? WHERE USERNAME = ?`;
+          db.getConnection((err, connection) => {
+            if (err) {
+              console.error("Error getting connection:", err);
+              return res.status(500).json({ error: "Internal server error" });
+            }
+            connection.query(
+              updateQuery,
+              [currentDateTime, USERNAME],
+              (updateErr) => {
+                connection.release();
+                if (updateErr) {
+                  console.error("[LOGIN] Database update error:", updateErr);
+                  return res
+                    .status(500)
+                    .json({ success: false, message: "Internal server error" });
+                }
+                const jwtToken = jwt.sign(
+                  { USERNAME },
+                  process.env.JWT_SECRET,
+                  {
+                    expiresIn: "90m",
+                  }
+                );
+                return res.status(200).json({
+                  success: true,
+                  message: "Login successful",
+                  jwtToken,
+                  userName: USERNAME,
+                  position: user.POSITION,
+                  name: user.NAME,
+                  userId: user.ID,
+                });
+              }
+            );
           });
-          return res.status(200).json({
-            success: true,
-            message: "Login successful",
-            jwtToken,
-            userName: USERNAME,
-            position: user.POSITION,
-            name: user.NAME,
-            userId: user.ID,
-          });
-        });
+        }
+      );
+    };
+    db.getConnection((err, connection) => {
+      if (err) {
+        console.error("Error getting connection:", err);
+        return res.status(500).json({ error: "Internal server error" });
       }
-    );
-  };
-  db.query(queryAdmin, [USERNAME], (err, adminResults) => {
-    if (err) {
-      console.error("[LOGIN] Database query error:", err);
-      return res
-        .status(500)
-        .json({ success: false, message: "Internal server error" });
-    }
-    if (adminResults.length === 1) {
-      handleLogin(adminResults[0], "admin");
-    } else {
-      db.query(queryUser, [USERNAME], (err, userResults) => {
+      connection.query(queryAdmin, [USERNAME], (err, adminResults) => {
+        connection.release();
         if (err) {
           console.error("[LOGIN] Database query error:", err);
           return res
             .status(500)
             .json({ success: false, message: "Internal server error" });
         }
-        if (userResults.length === 1) {
-          handleLogin(userResults[0], "user");
+        if (adminResults.length === 1) {
+          handleLogin(adminResults[0], "admin");
         } else {
-          return res
-            .status(401)
-            .json({ success: false, message: "Username is incorrect" });
+          connection.query(queryUser, [USERNAME], (err, userResults) => {
+            connection.release();
+            if (err) {
+              console.error("[LOGIN] Database query error:", err);
+              return res
+                .status(500)
+                .json({ success: false, message: "Internal server error" });
+            }
+            if (userResults.length === 1) {
+              handleLogin(userResults[0], "user");
+            } else {
+              return res
+                .status(401)
+                .json({ success: false, message: "Username is incorrect" });
+            }
+          });
         }
       });
-    }
-  });
-});
+    });
+  }
+);
 
 app.post("/logout", (req, res) => {
   const { USERID, USERNAME, POSITION } = req.body;
@@ -209,12 +254,23 @@ app.post("/logout", (req, res) => {
           WHERE USERNAME = ? AND ID = ?
         `;
 
-  db.query(updateQuery, ["DEACTIVATED", USERNAME, USERID], (err, result) => {
+  db.getConnection((err, connection) => {
     if (err) {
+      console.error("Error getting connection:", err);
       return res.status(500).json({ message: "Error in Logout" });
     }
+    connection.query(
+      updateQuery,
+      ["DEACTIVATED", USERNAME, USERID],
+      (err, result) => {
+        connection.release();
+        if (err) {
+          return res.status(500).json({ message: "Error in Logout" });
+        }
 
-    res.status(200).json({ message: "Logged Out" });
+        res.status(200).json({ message: "Logged Out" });
+      }
+    );
   });
 });
 
@@ -236,18 +292,29 @@ app.get("/jobID", authenticateToken, (req, res) => {
     LIMIT 1
   `;
 
-  db.query(query, [formattedStartDate, formattedEndDate], (err, results) => {
+  db.getConnection((err, connection) => {
     if (err) {
-      console.error("Error executing query:", err);
+      console.error("Error getting connection:", err);
       return res.status(500).json({ error: "Failed to execute query" });
     }
+    connection.query(
+      query,
+      [formattedStartDate, formattedEndDate],
+      (err, results) => {
+        connection.release();
+        if (err) {
+          console.error("Error executing query:", err);
+          return res.status(500).json({ error: "Failed to execute query" });
+        }
 
-    // Check if results exist and respond accordingly
-    if (results.length > 0) {
-      res.json({ JOB_ID: results[0].JOB_ID });
-    } else {
-      res.json({});
-    }
+        // Check if results exist and respond accordingly
+        if (results.length > 0) {
+          res.json({ JOB_ID: results[0].JOB_ID });
+        } else {
+          res.json({});
+        }
+      }
+    );
   });
 });
 
@@ -266,11 +333,18 @@ app.get("/jobSheetPickers", authenticateToken, (req, res) => {
   // Execute all queries concurrently using Promise.all
   const queryPromises = Object.entries(queries).map(([key, query]) => {
     return new Promise((resolve, reject) => {
-      db.query(query, (err, results) => {
+      db.getConnection((err, connection) => {
         if (err) {
           reject({ key, error: err });
         } else {
-          resolve({ key, data: results.map((row) => row.NAME) }); // Map results to array of names
+          connection.query(query, (err, results) => {
+            connection.release();
+            if (err) {
+              reject({ key, error: err });
+            } else {
+              resolve({ key, data: results.map((row) => row.NAME) }); // Map results to array of names
+            }
+          });
         }
       });
     });
@@ -302,23 +376,30 @@ app.get("/printData", authenticateToken, (req, res) => {
 
   const query = "SELECT * FROM job_details WHERE JOB_ID = ?";
 
-  db.query(query, [jobID], (err, results) => {
+  db.getConnection((err, connection) => {
     if (err) {
-      console.error("Error executing query:", err);
+      console.error("Error getting connection:", err);
       return res.status(500).json({ error: "Failed to execute query" });
     }
+    connection.query(query, [jobID], (err, results) => {
+      connection.release();
+      if (err) {
+        console.error("Error executing query:", err);
+        return res.status(500).json({ error: "Failed to execute query" });
+      }
 
-    if (results.length === 0) {
-      return res.json([]);
-    }
+      if (results.length === 0) {
+        return res.json([]);
+      }
 
-    const formattedResults = results.map((result) => ({
-      ...result,
-      IN_DATE: covertDateFormate(result.IN_DATE),
-      OUT_DATE: covertDateFormate(result.OUT_DATE),
-    }));
+      const formattedResults = results.map((result) => ({
+        ...result,
+        IN_DATE: covertDateFormate(result.IN_DATE),
+        OUT_DATE: covertDateFormate(result.OUT_DATE),
+      }));
 
-    res.json(formattedResults);
+      res.json(formattedResults);
+    });
   });
 });
 
@@ -364,25 +445,32 @@ app.get("/allData", authenticateToken, (req, res) => {
   query += ` ORDER BY ID DESC`;
 
   // Execute the query
-  db.query(query, queryParams, (err, results) => {
+  db.getConnection((err, connection) => {
     if (err) {
-      console.error("Database query error:", err);
+      console.error("Error getting connection:", err);
       return res.status(500).json({ error: "Internal Server Error" });
     }
+    connection.query(query, queryParams, (err, results) => {
+      connection.release();
+      if (err) {
+        console.error("Database query error:", err);
+        return res.status(500).json({ error: "Internal Server Error" });
+      }
 
-    // Modify the results
-    const modifiedResults = results.map((row, index) => {
-      const { ID, IN_DATE, OUT_DATE, ...rest } = row;
+      // Modify the results
+      const modifiedResults = results.map((row, index) => {
+        const { ID, IN_DATE, OUT_DATE, ...rest } = row;
 
-      return {
-        newID: index + 1, // Generate a new ID
-        IN_DATE: covertDateFormate(IN_DATE), // Format to 'dd-MM-yyyy'
-        OUT_DATE: covertDateFormate(OUT_DATE), // Format to 'dd-MM-yyyy'
-        ...rest, // Other data
-      };
+        return {
+          newID: index + 1, // Generate a new ID
+          IN_DATE: covertDateFormate(IN_DATE), // Format to 'dd-MM-yyyy'
+          OUT_DATE: covertDateFormate(OUT_DATE), // Format to 'dd-MM-yyyy'
+          ...rest, // Other data
+        };
+      });
+
+      res.status(200).json(modifiedResults); // Send the modified results
     });
-
-    res.status(200).json(modifiedResults); // Send the modified results
   });
 });
 
@@ -391,14 +479,21 @@ app.get("/userList", authenticateToken, (req, res) => {
   // Select all users from the user table
   const query = "SELECT * FROM user";
 
-  db.query(query, (err, results) => {
+  db.getConnection((err, connection) => {
     if (err) {
-      console.error("Database query error:", err);
+      console.error("Error getting connection:", err);
       return res.status(500).json({ error: "Internal Server Error" });
     }
+    connection.query(query, (err, results) => {
+      connection.release();
+      if (err) {
+        console.error("Database query error:", err);
+        return res.status(500).json({ error: "Internal Server Error" });
+      }
 
-    // Send the results directly
-    res.status(200).json(results);
+      // Send the results directly
+      res.status(200).json(results);
+    });
   });
 });
 
@@ -415,20 +510,27 @@ app.get("/pickersList", authenticateToken, (req, res) => {
   const query = `SELECT NAME FROM ${pickerTableName[menuSelected]}`;
 
   // Execute the query
-  db.query(query, (err, results) => {
+  db.getConnection((err, connection) => {
     if (err) {
-      console.error("Database query error:", err);
+      console.error("Error getting connection:", err);
       return res.status(500).json({ error: "Internal Server Error" });
     }
+    connection.query(query, (err, results) => {
+      connection.release();
+      if (err) {
+        console.error("Database query error:", err);
+        return res.status(500).json({ error: "Internal Server Error" });
+      }
 
-    // If no results found
-    if (results.length === 0) {
-      return res.status(404).json({ message: "No data found" });
-    }
+      // If no results found
+      if (results.length === 0) {
+        return res.status(404).json({ message: "No data found" });
+      }
 
-    // Send the results as an array of names
-    const names = results.map((row) => row.NAME);
-    res.status(200).json(names);
+      // Send the results as an array of names
+      const names = results.map((row) => row.NAME);
+      res.status(200).json(names);
+    });
   });
 });
 
@@ -456,13 +558,20 @@ app.get("/insight", authenticateToken, (req, res) => {
   const queryParams = [convertedInDateFrom, convertedInDateTo];
 
   // Execute the query
-  db.query(query, queryParams, (err, results) => {
+  db.getConnection((err, connection) => {
     if (err) {
-      console.error("Database query error:", err);
+      console.error("Error getting connection:", err);
       return res.status(500).json({ error: "Internal Server Error" });
     }
+    connection.query(query, queryParams, (err, results) => {
+      connection.release();
+      if (err) {
+        console.error("Database query error:", err);
+        return res.status(500).json({ error: "Internal Server Error" });
+      }
 
-    res.status(200).json(results);
+      res.status(200).json(results);
+    });
   });
 });
 
@@ -527,19 +636,16 @@ app.post("/insert", authenticateToken, (req, res) => {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `;
 
-  db.beginTransaction((err) => {
+  db.getConnection((err, connection) => {
     if (err) {
-      console.error("Transaction Error:", err);
+      console.error("Error getting connection:", err);
       return res.status(500).json({ error: "Transaction failed to start" });
     }
 
-    // Check if jobID already exists
-    db.query(checkJobIDQuery, [jobID], (err, results) => {
+    connection.query(checkJobIDQuery, [jobID], (err, results) => {
+      connection.release();
       if (err) {
-        return db.rollback(() => {
-          console.error("Job ID Check Error:", err);
-          return res.status(500).json({ error: "Error checking Job ID" });
-        });
+        return res.status(500).json({ error: "Error checking Job ID" });
       }
 
       if (results.length > 0) {
@@ -547,26 +653,12 @@ app.post("/insert", authenticateToken, (req, res) => {
       }
 
       // Proceed with insert if jobID does not exist
-      db.query(insertQuery, commonData, (err) => {
+      connection.query(insertQuery, commonData, (err) => {
         if (err) {
-          return db.rollback(() => {
-            console.error("Insert Error:", err);
-            return res.status(500).json({ error: "Error inserting record" });
-          });
+          return res.status(500).json({ error: "Error inserting record" });
         }
 
-        db.commit((err) => {
-          if (err) {
-            return db.rollback(() => {
-              console.error("Commit Error:", err);
-              return res
-                .status(500)
-                .json({ error: "Transaction commit failed" });
-            });
-          }
-
-          res.json({ message: "Job details inserted successfully" });
-        });
+        res.json({ message: "Job details inserted successfully" });
       });
     });
   });
@@ -578,50 +670,29 @@ app.post("/insertPicker", authenticateToken, (req, res) => {
   const checkPickerQuery = `SELECT 1 FROM ${pickerTableName[menuSelected]} WHERE NAME = ? LIMIT 1`;
   const insertQuery = `INSERT INTO ${pickerTableName[menuSelected]} (NAME) VALUES (?)`;
 
-  db.beginTransaction((err) => {
+  db.getConnection((err, connection) => {
     if (err) {
-      console.error("Transaction Error:", err);
+      console.error("Error getting connection:", err);
       return res.status(500).json({ error: "Transaction failed to start" });
     }
 
-    // Check if picker name already exists
-    db.query(checkPickerQuery, [pickerName], (err, results) => {
+    connection.query(checkPickerQuery, [pickerName], (err, results) => {
+      connection.release();
       if (err) {
-        return db.rollback(() => {
-          console.error("Picker Name Check Error:", err);
-          return res.status(500).json({ error: "Error checking picker name" });
-        });
+        return res.status(500).json({ error: "Error checking picker name" });
       }
 
       if (results.length > 0) {
-        return db.rollback(() => {
-          res.status(400).json({ error: "Picker name already exists" });
-        });
+        return res.status(400).json({ error: "Picker name already exists" });
       }
 
       // Insert new picker name
-      db.query(insertQuery, [pickerName], (err) => {
+      connection.query(insertQuery, [pickerName], (err) => {
         if (err) {
-          return db.rollback(() => {
-            console.error("Insert Error:", err);
-            return res
-              .status(500)
-              .json({ error: "Error inserting picker name" });
-          });
+          return res.status(500).json({ error: "Error inserting picker name" });
         }
 
-        db.commit((err) => {
-          if (err) {
-            return db.rollback(() => {
-              console.error("Commit Error:", err);
-              return res
-                .status(500)
-                .json({ error: "Transaction commit failed" });
-            });
-          }
-
-          res.json({ message: "Picker details inserted successfully" });
-        });
+        res.json({ message: "Picker details inserted successfully" });
       });
     });
   });
@@ -645,83 +716,112 @@ app.post("/createUser", authenticateToken, (req, res) => {
   // Step 1: Verify admin's transaction password
   const selectQuery =
     "SELECT TPASSWORD FROM admin WHERE USERNAME = ? AND ID = ?";
-  db.query(selectQuery, [userName, userId], (err, results) => {
+  db.getConnection((err, connection) => {
     if (err) {
-      console.error("Database error:", err);
+      console.error("Error getting connection:", err);
       return res.status(500).json({ message: "Database error" });
     }
-
-    // Check if admin record was found
-    if (!results || results.length === 0) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    const storedPassword = results[0].TPASSWORD;
-
-    // Compare the old password with the stored one
-    bcrypt.compare(
-      admintPassword + process.env.SALT_KEY,
-      storedPassword,
-      (bcryptErr, isMatch) => {
-        if (bcryptErr) {
-          console.error("Bcrypt error:", bcryptErr);
-          return res.status(500).json({ message: "Internal server error" });
-        }
-
-        if (!isMatch) {
-          return res
-            .status(400)
-            .json({ message: "Transaction password is incorrect" });
-        }
-
-        // Step 2: Check if the new username already exists
-        const checkUsernameQuery = "SELECT 1 FROM user WHERE USERNAME = ?";
-        db.query(checkUsernameQuery, [newUserName], (err, userResult) => {
-          if (err) {
-            console.error("Database error:", err);
-            return res.status(500).json({ message: "Database error" });
-          }
-
-          if (userResult && userResult.length > 0) {
-            return res.status(400).json({ message: "Username already exists" });
-          }
-
-          // Step 3: Hash the new password
-          bcrypt.hash(
-            newPassword + process.env.SALT_KEY,
-            10,
-            (hashErr, hashedPassword) => {
-              if (hashErr) {
-                console.error("Error hashing password:", hashErr);
-                return res
-                  .status(500)
-                  .json({ message: "Internal server error" });
-              }
-
-              // Step 4: Proceed with user creation
-              const insertQuery =
-                "INSERT INTO user (USERNAME, NAME, PASSWORD) VALUES (?, ?, ?)";
-              db.query(
-                insertQuery,
-                [newUserName, newName, hashedPassword],
-                (err) => {
-                  if (err) {
-                    console.error("Error creating user:", err);
-                    return res
-                      .status(500)
-                      .json({ message: "Error Creating User" });
-                  }
-
-                  res
-                    .status(200)
-                    .json({ message: "User Created successfully" });
-                }
-              );
-            }
-          );
-        });
+    connection.query(selectQuery, [userName, userId], (err, results) => {
+      connection.release();
+      if (err) {
+        console.error("Database error:", err);
+        return res.status(500).json({ message: "Database error" });
       }
-    );
+
+      // Check if admin record was found
+      if (!results || results.length === 0) {
+        return res.status(404).json({ message: "User not found" });
+      }
+
+      const storedPassword = results[0].TPASSWORD;
+
+      // Compare the old password with the stored one
+      bcrypt.compare(
+        admintPassword + process.env.SALT_KEY,
+        storedPassword,
+        (bcryptErr, isMatch) => {
+          if (bcryptErr) {
+            console.error("Bcrypt error:", bcryptErr);
+            return res.status(500).json({ message: "Internal server error" });
+          }
+
+          if (!isMatch) {
+            return res
+              .status(400)
+              .json({ message: "Transaction password is incorrect" });
+          }
+
+          // Step 2: Check if the new username already exists
+          const checkUsernameQuery = "SELECT 1 FROM user WHERE USERNAME = ?";
+          db.getConnection((err, connection) => {
+            if (err) {
+              console.error("Error getting connection:", err);
+              return res.status(500).json({ message: "Database error" });
+            }
+            connection.query(
+              checkUsernameQuery,
+              [newUserName],
+              (err, userResult) => {
+                connection.release();
+                if (err) {
+                  console.error("Database error:", err);
+                  return res.status(500).json({ message: "Database error" });
+                }
+
+                if (userResult && userResult.length > 0) {
+                  return res
+                    .status(400)
+                    .json({ message: "Username already exists" });
+                }
+
+                // Step 3: Hash the new password
+                bcrypt.hash(
+                  newPassword + process.env.SALT_KEY,
+                  10,
+                  (hashErr, hashedPassword) => {
+                    if (hashErr) {
+                      console.error("Error hashing password:", hashErr);
+                      return res
+                        .status(500)
+                        .json({ message: "Internal server error" });
+                    }
+
+                    // Step 4: Proceed with user creation
+                    const insertQuery =
+                      "INSERT INTO user (USERNAME, NAME, PASSWORD) VALUES (?, ?, ?)";
+                    db.getConnection((err, connection) => {
+                      if (err) {
+                        console.error("Error getting connection:", err);
+                        return res
+                          .status(500)
+                          .json({ message: "Database error" });
+                      }
+                      connection.query(
+                        insertQuery,
+                        [newUserName, newName, hashedPassword],
+                        (err) => {
+                          connection.release();
+                          if (err) {
+                            console.error("Error creating user:", err);
+                            return res
+                              .status(500)
+                              .json({ message: "Error Creating User" });
+                          }
+
+                          res
+                            .status(200)
+                            .json({ message: "User Created successfully" });
+                        }
+                      );
+                    });
+                  }
+                );
+              }
+            );
+          });
+        }
+      );
+    });
   });
 });
 
@@ -792,9 +892,9 @@ app.post("/editJob", authenticateToken, (req, res) => {
   ];
 
   // Start transaction
-  db.beginTransaction((err) => {
+  db.getConnection((err, connection) => {
     if (err) {
-      console.error("Error starting transaction:", err);
+      console.error("Error getting connection:", err);
       return res
         .status(500)
         .json({ success: false, message: "Failed to start transaction" });
@@ -802,14 +902,12 @@ app.post("/editJob", authenticateToken, (req, res) => {
 
     // Only check for jobID existence if the new jobID is different from the old jobID
     if (jobID !== oldJobID) {
-      db.query(checkJobIDQuery, [jobID], (err, results) => {
+      connection.query(checkJobIDQuery, [jobID], (err, results) => {
+        connection.release();
         if (err) {
-          return db.rollback(() => {
-            console.error("Error checking jobID:", err);
-            return res
-              .status(500)
-              .json({ success: false, message: "Failed to check job ID" });
-          });
+          return res
+            .status(500)
+            .json({ success: false, message: "Failed to check job ID" });
         }
 
         if (results.length > 0) {
@@ -828,25 +926,21 @@ app.post("/editJob", authenticateToken, (req, res) => {
   });
 
   function updateJobDetails() {
-    db.query(updateQuery, commonData, (err) => {
+    db.getConnection((err, connection) => {
       if (err) {
-        return db.rollback(() => {
-          console.error("Error updating job_details:", err);
-          return res.status(500).json({
-            success: false,
-            message: "Failed to update record in job_details",
-          });
+        console.error("Error getting connection:", err);
+        return res.status(500).json({
+          success: false,
+          message: "Failed to start transaction",
         });
       }
 
-      db.commit((err) => {
+      connection.query(updateQuery, commonData, (err) => {
+        connection.release();
         if (err) {
-          return db.rollback(() => {
-            console.error("Error committing transaction:", err);
-            return res.status(500).json({
-              success: false,
-              message: "Failed to commit transaction",
-            });
+          return res.status(500).json({
+            success: false,
+            message: "Failed to update record in job_details",
           });
         }
 
@@ -870,66 +964,86 @@ app.post("/changePassword", authenticateToken, (req, res) => {
     WHERE USERNAME = ? AND ID = ?
   `;
 
-  db.query(selectQuery, [userName, userId], (err, result) => {
+  db.getConnection((err, connection) => {
     if (err) {
+      console.error("Error getting connection:", err);
       return res.status(500).json({ message: "Database error", error: err });
     }
+    connection.query(selectQuery, [userName, userId], (err, result) => {
+      connection.release();
+      if (err) {
+        return res.status(500).json({ message: "Database error", error: err });
+      }
 
-    if (result.length === 0) {
-      return res.status(404).json({ message: "User not found" });
-    }
+      if (result.length === 0) {
+        return res.status(404).json({ message: "User not found" });
+      }
 
-    const storedPassword = result[0].PASSWORD;
+      const storedPassword = result[0].PASSWORD;
 
-    // Compare the old password with the stored one
-    bcrypt.compare(
-      oldPassword + process.env.SALT_KEY,
-      storedPassword,
-      (err, isMatch) => {
-        if (err) {
-          return res.status(500).json({ message: "Error comparing passwords" });
-        }
+      // Compare the old password with the stored one
+      bcrypt.compare(
+        oldPassword + process.env.SALT_KEY,
+        storedPassword,
+        (err, isMatch) => {
+          if (err) {
+            return res
+              .status(500)
+              .json({ message: "Error comparing passwords" });
+          }
 
-        if (!isMatch) {
-          return res.status(400).json({ message: "Old password is incorrect" });
-        }
+          if (!isMatch) {
+            return res
+              .status(400)
+              .json({ message: "Old password is incorrect" });
+          }
 
-        // Hash the new password with the salt and bcrypt
-        bcrypt.hash(
-          newPassword + process.env.SALT_KEY,
-          10,
-          (err, hashedPassword) => {
-            if (err) {
-              return res
-                .status(500)
-                .json({ message: "Error hashing new password" });
-            }
+          // Hash the new password with the salt and bcrypt
+          bcrypt.hash(
+            newPassword + process.env.SALT_KEY,
+            10,
+            (err, hashedPassword) => {
+              if (err) {
+                return res
+                  .status(500)
+                  .json({ message: "Error hashing new password" });
+              }
 
-            const updateQuery = `
+              const updateQuery = `
           UPDATE ${table} 
           SET PASSWORD = ? 
           WHERE USERNAME = ? AND ID = ?
         `;
 
-            db.query(
-              updateQuery,
-              [hashedPassword, userName, userId],
-              (err, result) => {
+              db.getConnection((err, connection) => {
                 if (err) {
+                  console.error("Error getting connection:", err);
                   return res
                     .status(500)
                     .json({ message: "Error updating password" });
                 }
+                connection.query(
+                  updateQuery,
+                  [hashedPassword, userName, userId],
+                  (err, result) => {
+                    connection.release();
+                    if (err) {
+                      return res
+                        .status(500)
+                        .json({ message: "Error updating password" });
+                    }
 
-                res
-                  .status(200)
-                  .json({ message: "Password updated successfully" });
-              }
-            );
-          }
-        );
-      }
-    );
+                    res
+                      .status(200)
+                      .json({ message: "Password updated successfully" });
+                  }
+                );
+              });
+            }
+          );
+        }
+      );
+    });
   });
 });
 
@@ -946,66 +1060,86 @@ app.post("/changeTPassword", authenticateToken, (req, res) => {
     WHERE USERNAME = ? AND ID = ?
   `;
 
-  db.query(selectQuery, [userName, userId], (err, result) => {
+  db.getConnection((err, connection) => {
     if (err) {
+      console.error("Error getting connection:", err);
       return res.status(500).json({ message: "Database error", error: err });
     }
+    connection.query(selectQuery, [userName, userId], (err, result) => {
+      connection.release();
+      if (err) {
+        return res.status(500).json({ message: "Database error", error: err });
+      }
 
-    if (result.length === 0) {
-      return res.status(404).json({ message: "User not found" });
-    }
+      if (result.length === 0) {
+        return res.status(404).json({ message: "User not found" });
+      }
 
-    const storedPassword = result[0].TPASSWORD;
+      const storedPassword = result[0].TPASSWORD;
 
-    // Compare the old password with the stored one
-    bcrypt.compare(
-      oldPassword + process.env.SALT_KEY,
-      storedPassword,
-      (err, isMatch) => {
-        if (err) {
-          return res.status(500).json({ message: "Error comparing passwords" });
-        }
+      // Compare the old password with the stored one
+      bcrypt.compare(
+        oldPassword + process.env.SALT_KEY,
+        storedPassword,
+        (err, isMatch) => {
+          if (err) {
+            return res
+              .status(500)
+              .json({ message: "Error comparing passwords" });
+          }
 
-        if (!isMatch) {
-          return res.status(400).json({ message: "Old password is incorrect" });
-        }
+          if (!isMatch) {
+            return res
+              .status(400)
+              .json({ message: "Old password is incorrect" });
+          }
 
-        // Hash the new password with the salt and bcrypt
-        bcrypt.hash(
-          newPassword + process.env.SALT_KEY,
-          10,
-          (err, hashedPassword) => {
-            if (err) {
-              return res
-                .status(500)
-                .json({ message: "Error hashing new password" });
-            }
+          // Hash the new password with the salt and bcrypt
+          bcrypt.hash(
+            newPassword + process.env.SALT_KEY,
+            10,
+            (err, hashedPassword) => {
+              if (err) {
+                return res
+                  .status(500)
+                  .json({ message: "Error hashing new password" });
+              }
 
-            const updateQuery = `
+              const updateQuery = `
           UPDATE admin 
           SET TPASSWORD = ? 
           WHERE USERNAME = ? AND ID = ?
         `;
 
-            db.query(
-              updateQuery,
-              [hashedPassword, userName, userId],
-              (err, result) => {
+              db.getConnection((err, connection) => {
                 if (err) {
+                  console.error("Error getting connection:", err);
                   return res
                     .status(500)
                     .json({ message: "Error updating password" });
                 }
+                connection.query(
+                  updateQuery,
+                  [hashedPassword, userName, userId],
+                  (err, result) => {
+                    connection.release();
+                    if (err) {
+                      return res
+                        .status(500)
+                        .json({ message: "Error updating password" });
+                    }
 
-                res
-                  .status(200)
-                  .json({ message: "Password updated successfully" });
-              }
-            );
-          }
-        );
-      }
-    );
+                    res
+                      .status(200)
+                      .json({ message: "Password updated successfully" });
+                  }
+                );
+              });
+            }
+          );
+        }
+      );
+    });
   });
 });
 
@@ -1032,19 +1166,30 @@ app.post("/resetPassword", authenticateToken, async (req, res) => {
     const updateQuery = "UPDATE user SET PASSWORD = ? WHERE USERNAME = ?";
 
     // Execute the update query
-    db.query(updateQuery, [hashedPassword, userName], (err, result) => {
+    db.getConnection((err, connection) => {
       if (err) {
-        console.error("Error updating password:", err);
+        console.error("Error getting connection:", err);
         return res.status(500).json({ message: "Error updating password" });
       }
+      connection.query(
+        updateQuery,
+        [hashedPassword, userName],
+        (err, result) => {
+          connection.release();
+          if (err) {
+            console.error("Error updating password:", err);
+            return res.status(500).json({ message: "Error updating password" });
+          }
 
-      if (result.affectedRows === 0) {
-        return res.status(404).json({ message: "User not found" });
-      }
+          if (result.affectedRows === 0) {
+            return res.status(404).json({ message: "User not found" });
+          }
 
-      res
-        .status(200)
-        .json({ message: `Password reset to abc@123 for user - ${userName}` });
+          res.status(200).json({
+            message: `Password reset to abc@123 for user - ${userName}`,
+          });
+        }
+      );
     });
   } catch (error) {
     console.error("Error hashing new password:", error);
@@ -1066,19 +1211,17 @@ app.post("/editPicker", authenticateToken, (req, res) => {
     WHERE NAME = ?
   `;
 
-  db.beginTransaction((err) => {
+  db.getConnection((err, connection) => {
     if (err) {
-      console.error("Error starting transaction:", err);
+      console.error("Error getting connection:", err);
       return res.status(500).json({ error: "Failed to start transaction" });
     }
 
     // Check if the new picker name already exists in the table
-    db.query(checkPickerExistsQuery, [newPicker], (err, results) => {
+    connection.query(checkPickerExistsQuery, [newPicker], (err, results) => {
+      connection.release();
       if (err) {
-        return db.rollback(() => {
-          console.error("Error checking picker existence:", err);
-          return res.status(500).json({ error: "Failed to check picker name" });
-        });
+        return res.status(500).json({ error: "Failed to check picker name" });
       }
 
       if (results.length > 0) {
@@ -1088,35 +1231,18 @@ app.post("/editPicker", authenticateToken, (req, res) => {
       }
 
       // Perform the update
-      db.query(updateQuery, [newPicker, oldPicker], (err, result) => {
+      connection.query(updateQuery, [newPicker, oldPicker], (err, result) => {
         if (err) {
-          return db.rollback(() => {
-            console.error("Error updating picker name:", err);
-            return res
-              .status(500)
-              .json({ error: "Failed to update picker name" });
-          });
+          return res
+            .status(500)
+            .json({ error: "Failed to update picker name" });
         }
 
         if (result.affectedRows === 0) {
-          return db.rollback(() => {
-            return res.status(404).json({ error: "Old picker name not found" });
-          });
+          return res.status(404).json({ error: "Old picker name not found" });
         }
 
-        // Commit the transaction
-        db.commit((err) => {
-          if (err) {
-            return db.rollback(() => {
-              console.error("Error committing transaction:", err);
-              return res
-                .status(500)
-                .json({ error: "Failed to commit transaction" });
-            });
-          }
-
-          res.json({ message: "Picker name updated successfully" });
-        });
+        res.json({ message: "Picker name updated successfully" });
       });
     });
   });
@@ -1141,20 +1267,27 @@ app.post("/deleteUser", authenticateToken, async (req, res) => {
     const deleteQuery = "DELETE FROM user WHERE USERNAME = ?";
 
     // Execute the delete query
-    db.query(deleteQuery, [userName], (err, result) => {
+    db.getConnection((err, connection) => {
       if (err) {
-        console.error("Error deleting user:", err);
+        console.error("Error getting connection:", err);
         return res.status(500).json({ message: "Error deleting user" });
       }
+      connection.query(deleteQuery, [userName], (err, result) => {
+        connection.release();
+        if (err) {
+          console.error("Error deleting user:", err);
+          return res.status(500).json({ message: "Error deleting user" });
+        }
 
-      // Check if any rows were affected
-      if (result.affectedRows === 0) {
-        return res.status(404).json({ message: "User not found" });
-      }
+        // Check if any rows were affected
+        if (result.affectedRows === 0) {
+          return res.status(404).json({ message: "User not found" });
+        }
 
-      res
-        .status(200)
-        .json({ message: `User '${userName}' deleted successfully.` });
+        res
+          .status(200)
+          .json({ message: `User '${userName}' deleted successfully.` });
+      });
     });
   } catch (error) {
     console.error("Unexpected error:", error);
@@ -1180,18 +1313,27 @@ app.post("/deleteJob", authenticateToken, async (req, res) => {
     const deleteQuery = "DELETE FROM job_details WHERE JOB_ID = ?";
 
     // Execute the delete query
-    db.query(deleteQuery, [JobID], (err, result) => {
+    db.getConnection((err, connection) => {
       if (err) {
-        console.error("Error deleting job:", err);
+        console.error("Error getting connection:", err);
         return res.status(500).json({ message: "Error deleting job" });
       }
+      connection.query(deleteQuery, [JobID], (err, result) => {
+        connection.release();
+        if (err) {
+          console.error("Error deleting job:", err);
+          return res.status(500).json({ message: "Error deleting job" });
+        }
 
-      // Check if any rows were affected
-      if (result.affectedRows === 0) {
-        return res.status(404).json({ message: "Job not found." });
-      }
+        // Check if any rows were affected
+        if (result.affectedRows === 0) {
+          return res.status(404).json({ message: "Job not found." });
+        }
 
-      res.status(200).json({ message: `Job '${JobID}' deleted successfully.` });
+        res
+          .status(200)
+          .json({ message: `Job '${JobID}' deleted successfully.` });
+      });
     });
   } catch (error) {
     console.error("Unexpected error:", error);
@@ -1221,25 +1363,38 @@ app.post("/deletePicker", authenticateToken, async (req, res) => {
     const deleteQuery = `DELETE FROM ${pickerTableName[menuSelected]} WHERE NAME = ?`;
 
     // Execute the delete query
-    db.query(deleteQuery, [pickerName], (err, result) => {
+    db.getConnection((err, connection) => {
       if (err) {
-        console.error("Error deleting user:", err);
+        console.error("Error getting connection:", err);
         return res.status(500).json({ message: "Error deleting picker" });
       }
+      connection.query(deleteQuery, [pickerName], (err, result) => {
+        connection.release();
+        if (err) {
+          console.error("Error deleting user:", err);
+          return res.status(500).json({ message: "Error deleting picker" });
+        }
 
-      // Check if any rows were affected
-      if (result.affectedRows === 0) {
-        return res.status(404).json({ message: "picker not found" });
-      }
+        // Check if any rows were affected
+        if (result.affectedRows === 0) {
+          return res.status(404).json({ message: "picker not found" });
+        }
 
-      res
-        .status(200)
-        .json({ message: `Picker '${pickerName}' deleted successfully.` });
+        res
+          .status(200)
+          .json({ message: `Picker '${pickerName}' deleted successfully.` });
+      });
     });
   } catch (error) {
     console.error("Unexpected error:", error);
     res.status(500).json({ message: "Internal server error" });
   }
+});
+
+// Centralized error handler
+app.use((err, req, res, next) => {
+  console.error("[ERROR]", err);
+  res.status(500).json({ message: "Internal server error" });
 });
 
 /* Start server */

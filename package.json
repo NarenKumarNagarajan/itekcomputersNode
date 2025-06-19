@@ -19,9 +19,13 @@
     "date-fns": "^3.6.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "express-rate-limit": "^7.5.0",
+    "express-validator": "^7.2.1",
+    "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
     "moment-timezone": "^0.5.45",
     "mysql": "^2.18.1",
+    "mysql2": "^3.14.1",
     "twin-bcrypt": "^2.1.1"
   }
 }
