@@ -117,6 +117,12 @@ const covertDateFormate = (dateInput) => {
 app.post("/login", (req, res) => {
   const { USERNAME, PASSWORD } = req.body;
 
+  if (!USERNAME || !PASSWORD) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Username and password are required" });
+  }
+
   const queryAdmin = "SELECT * FROM admin WHERE USERNAME = ?";
   const queryUser = "SELECT * FROM user WHERE USERNAME = ?";
 
@@ -126,31 +132,33 @@ app.post("/login", (req, res) => {
       user.PASSWORD,
       (bcryptErr, bcryptResult) => {
         if (bcryptErr) {
-          console.error("Bcrypt error:", bcryptErr);
-          return res.status(500).json({ message: "Internal server error" });
+          console.error("[LOGIN] Bcrypt error:", bcryptErr);
+          return res
+            .status(500)
+            .json({ success: false, message: "Internal server error" });
         }
-
         if (!bcryptResult) {
-          return res.status(401).json({ message: "Password is wrong" });
+          return res
+            .status(401)
+            .json({ success: false, message: "Password is incorrect" });
         }
-
         const currentDateTime = moment()
           .tz("Asia/Kolkata")
           .format("YYYY-MM-DD HH:mm:ss");
-
         const updateQuery = `UPDATE ${tableName} SET STATUS = 'ACTIVATED', LAST_LOGIN = ? WHERE USERNAME = ?`;
-
         db.query(updateQuery, [currentDateTime, USERNAME], (updateErr) => {
           if (updateErr) {
-            console.error("Database update error:", updateErr);
-            return res.status(500).json({ message: "Internal server error" });
+            console.error("[LOGIN] Database update error:", updateErr);
+            return res
+              .status(500)
+              .json({ success: false, message: "Internal server error" });
           }
-
           const jwtToken = jwt.sign({ USERNAME }, process.env.JWT_SECRET, {
             expiresIn: "90m",
           });
-
-          return res.json({
+          return res.status(200).json({
+            success: true,
+            message: "Login successful",
             jwtToken,
             userName: USERNAME,
             position: user.POSITION,
@@ -161,30 +169,29 @@ app.post("/login", (req, res) => {
       }
     );
   };
-
-  // Check admin credentials
   db.query(queryAdmin, [USERNAME], (err, adminResults) => {
     if (err) {
-      console.error("Database query error:", err);
-      return res.status(500).json({ message: "Internal server error" });
+      console.error("[LOGIN] Database query error:", err);
+      return res
+        .status(500)
+        .json({ success: false, message: "Internal server error" });
     }
-
     if (adminResults.length === 1) {
-      // User found in admin table
       handleLogin(adminResults[0], "admin");
     } else {
-      // User not found in admin, check user table
       db.query(queryUser, [USERNAME], (err, userResults) => {
         if (err) {
-          console.error("Database query error:", err);
-          return res.status(500).json({ message: "Internal server error" });
+          console.error("[LOGIN] Database query error:", err);
+          return res
+            .status(500)
+            .json({ success: false, message: "Internal server error" });
         }
-
         if (userResults.length === 1) {
-          // User found in user table
           handleLogin(userResults[0], "user");
         } else {
-          return res.status(401).json({ message: "Username is wrong" });
+          return res
+            .status(401)
+            .json({ success: false, message: "Username is incorrect" });
         }
       });
     }
@@ -293,7 +300,7 @@ app.get("/printData", authenticateToken, (req, res) => {
     return res.status(400).json({ error: "jobID is required" });
   }
 
-  const query = `SELECT * FROM job_details WHERE JOB_ID = ?`;
+  const query = "SELECT * FROM job_details WHERE JOB_ID = ?";
 
   db.query(query, [jobID], (err, results) => {
     if (err) {
@@ -788,49 +795,67 @@ app.post("/editJob", authenticateToken, (req, res) => {
   db.beginTransaction((err) => {
     if (err) {
       console.error("Error starting transaction:", err);
-      return res.status(500).json({ error: "Failed to start transaction" });
+      return res
+        .status(500)
+        .json({ success: false, message: "Failed to start transaction" });
     }
 
-    // Check if the new jobID already exists in the database
-    db.query(checkJobIDQuery, [jobID], (err, results) => {
-      if (err) {
-        return db.rollback(() => {
-          console.error("Error checking jobID:", err);
-          return res.status(500).json({ error: "Failed to check job ID" });
-        });
-      }
-
-      if (results.length > 0) {
-        return res.status(400).json({ error: "Job ID already exists" });
-      }
-
-      // Update the job_details table
-      db.query(updateQuery, commonData, (err) => {
+    // Only check for jobID existence if the new jobID is different from the old jobID
+    if (jobID !== oldJobID) {
+      db.query(checkJobIDQuery, [jobID], (err, results) => {
         if (err) {
           return db.rollback(() => {
-            console.error("Error updating job_details:", err);
+            console.error("Error checking jobID:", err);
             return res
               .status(500)
-              .json({ error: "Failed to update record in job_details" });
+              .json({ success: false, message: "Failed to check job ID" });
           });
         }
 
-        // Commit the transaction
-        db.commit((err) => {
-          if (err) {
-            return db.rollback(() => {
-              console.error("Error committing transaction:", err);
-              return res
-                .status(500)
-                .json({ error: "Failed to commit transaction" });
-            });
-          }
+        if (results.length > 0) {
+          return res
+            .status(400)
+            .json({ success: false, message: "Job ID already exists" });
+        }
 
-          res.json({ message: "Record updated successfully" });
+        // Proceed with update if jobID is unique
+        updateJobDetails();
+      });
+    } else {
+      // If jobID hasn't changed, proceed directly to update
+      updateJobDetails();
+    }
+  });
+
+  function updateJobDetails() {
+    db.query(updateQuery, commonData, (err) => {
+      if (err) {
+        return db.rollback(() => {
+          console.error("Error updating job_details:", err);
+          return res.status(500).json({
+            success: false,
+            message: "Failed to update record in job_details",
+          });
         });
+      }
+
+      db.commit((err) => {
+        if (err) {
+          return db.rollback(() => {
+            console.error("Error committing transaction:", err);
+            return res.status(500).json({
+              success: false,
+              message: "Failed to commit transaction",
+            });
+          });
+        }
+
+        res
+          .status(200)
+          .json({ success: true, message: "Record updated successfully" });
       });
     });
-  });
+  }
 });
 
 app.post("/changePassword", authenticateToken, (req, res) => {
@@ -998,7 +1023,10 @@ app.post("/resetPassword", authenticateToken, async (req, res) => {
 
   try {
     // Hash the new password
-    const hashedPassword = await bcrypt.hash("1234" + process.env.SALT_KEY, 10);
+    const hashedPassword = await bcrypt.hash(
+      "abc@123" + process.env.SALT_KEY,
+      10
+    );
 
     // Prepare the update query
     const updateQuery = "UPDATE user SET PASSWORD = ? WHERE USERNAME = ?";
@@ -1016,7 +1044,7 @@ app.post("/resetPassword", authenticateToken, async (req, res) => {
 
       res
         .status(200)
-        .json({ message: `Password reset to 1234 for user - ${userName}` });
+        .json({ message: `Password reset to abc@123 for user - ${userName}` });
     });
   } catch (error) {
     console.error("Error hashing new password:", error);
