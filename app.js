@@ -187,7 +187,7 @@ app.post(
                   { USERNAME },
                   process.env.JWT_SECRET,
                   {
-                    expiresIn: "90m",
+                    expiresIn: "180m",
                   }
                 );
                 return res.status(200).json({
