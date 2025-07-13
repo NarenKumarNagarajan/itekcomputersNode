@@ -575,7 +575,58 @@ app.get("/insight", authenticateToken, (req, res) => {
   });
 });
 
-/* Get data queries code */
+/* Get Customer Details */
+app.get("/searchCustomer", authenticateToken, (req, res) => {
+  const { mobile, name } = req.query;
+
+  if (!mobile && !name) {
+    return res
+      .status(400)
+      .json({ error: "Please provide mobile or name for search" });
+  }
+
+  let query =
+    "SELECT NAME, MOBILE, EMAIL, ADDRESS FROM customer_details WHERE ";
+  const conditions = [];
+  const params = [];
+
+  if (mobile) {
+    conditions.push("MOBILE LIKE ?");
+    params.push(`%${mobile}%`);
+  }
+
+  if (name) {
+    conditions.push("NAME LIKE ?");
+    params.push(`%${name}%`);
+  }
+
+  query += conditions.join(" OR "); // Match any one
+
+  db.query(query, params, (err, results) => {
+    if (err) {
+      console.error("Error fetching customer data:", err);
+      return res.status(500).json({ error: "Internal server error" });
+    }
+
+    res.json({ customers: results });
+  });
+});
+
+/* Get customer details */
+app.get("/customerDetails", authenticateToken, (req, res) => {
+  const query = "SELECT NAME, MOBILE, EMAIL, ADDRESS FROM customer_details";
+
+  db.query(query, (err, results) => {
+    if (err) {
+      console.error("Error fetching customer details:", err);
+      return res.status(500).json({ error: "Internal server error" });
+    }
+
+    res.json({ customers: results });
+  });
+});
+
+/* end of Get data queries code */
 
 /* Insert data into job_details and backup */
 app.post("/insert", authenticateToken, (req, res) => {
@@ -604,7 +655,21 @@ app.post("/insert", authenticateToken, (req, res) => {
   const convertedInDate = convertDateToSQL(inDate);
   const convertedOutDate = convertDateToSQL(outDate);
 
-  const commonData = [
+  const checkJobIDQuery = "SELECT 1 FROM job_details WHERE JOB_ID = ? LIMIT 1";
+  const checkCustomerQuery =
+    "SELECT 1 FROM customer_details WHERE NAME = ? AND MOBILE = ? LIMIT 1";
+  const insertCustomerQuery =
+    "INSERT INTO customer_details (NAME, MOBILE, EMAIL, ADDRESS) VALUES (?, ?, ?, ?)";
+
+  const insertJobQuery = `
+    INSERT INTO job_details 
+    (JOB_ID, NAME, MOBILE, EMAIL, ADDRESS, ENGINEER, MOC, IN_DATE, OUT_DATE, 
+     ASSETS, PRODUCT_MAKE, DESCRIPTION, SERIAL_NO, FAULT_TYPE, FAULT_DESC, 
+     JOB_STATUS, AMOUNT, SOLUTION_PROVIDED, CREATED, LAST_MODIFIED) 
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `;
+
+  const jobData = [
     jobID,
     customerName,
     mobileNo,
@@ -627,39 +692,60 @@ app.post("/insert", authenticateToken, (req, res) => {
     name,
   ];
 
-  const checkJobIDQuery = "SELECT 1 FROM job_details WHERE JOB_ID = ? LIMIT 1";
-  const insertQuery = `
-    INSERT INTO job_details 
-    (JOB_ID, NAME, MOBILE, EMAIL, ADDRESS, ENGINEER, MOC, IN_DATE, OUT_DATE, 
-     ASSETS, PRODUCT_MAKE, DESCRIPTION, SERIAL_NO, FAULT_TYPE, FAULT_DESC, 
-     JOB_STATUS, AMOUNT, SOLUTION_PROVIDED, CREATED, LAST_MODIFIED) 
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `;
-
   db.getConnection((err, connection) => {
-    if (err) {
-      console.error("Error getting connection:", err);
-      return res.status(500).json({ error: "Transaction failed to start" });
-    }
+    if (err) return res.status(500).json({ error: "Connection failed" });
 
+    // Step 1: Check job ID
     connection.query(checkJobIDQuery, [jobID], (err, results) => {
-      connection.release();
       if (err) {
-        return res.status(500).json({ error: "Error checking Job ID" });
+        connection.release();
+        return res.status(500).json({ error: "Job ID check failed" });
       }
 
       if (results.length > 0) {
+        connection.release();
         return res.status(400).json({ error: "Job ID already exists" });
       }
 
-      // Proceed with insert if jobID does not exist
-      connection.query(insertQuery, commonData, (err) => {
-        if (err) {
-          return res.status(500).json({ error: "Error inserting record" });
-        }
+      // Step 2: Check if customer exists
+      connection.query(
+        checkCustomerQuery,
+        [customerName, mobileNo, email, address],
+        (err, results) => {
+          if (err) {
+            connection.release();
+            return res.status(500).json({ error: "Customer check failed" });
+          }
 
-        res.json({ message: "Job details inserted successfully" });
-      });
+          const proceedWithJobInsert = () => {
+            connection.query(insertJobQuery, jobData, (err) => {
+              connection.release();
+              if (err)
+                return res.status(500).json({ error: "Job insert failed" });
+              res.json({ message: "Job inserted successfully" });
+            });
+          };
+
+          // Step 3: Insert customer if not found
+          if (results.length === 0) {
+            connection.query(
+              insertCustomerQuery,
+              [customerName, mobileNo, email, address],
+              (err) => {
+                if (err) {
+                  connection.release();
+                  return res
+                    .status(500)
+                    .json({ error: "Customer insert failed" });
+                }
+                proceedWithJobInsert();
+              }
+            );
+          } else {
+            proceedWithJobInsert();
+          }
+        }
+      );
     });
   });
 });
@@ -856,6 +942,10 @@ app.post("/editJob", authenticateToken, (req, res) => {
   const convertedOutDate = convertDateToSQL(outDate);
 
   const checkJobIDQuery = "SELECT 1 FROM job_details WHERE JOB_ID = ? LIMIT 1";
+  const checkCustomerQuery =
+    "SELECT 1 FROM customer_details WHERE NAME = ? AND MOBILE = ? LIMIT 1";
+  const insertCustomerQuery =
+    "INSERT INTO customer_details (NAME, MOBILE) VALUES (?, ?)";
 
   const updateQuery = `
     UPDATE job_details 
@@ -866,7 +956,7 @@ app.post("/editJob", authenticateToken, (req, res) => {
     WHERE JOB_ID = ?
   `;
 
-  const commonData = [
+  const updateData = [
     jobID,
     customerName,
     mobileNo,
@@ -888,68 +978,126 @@ app.post("/editJob", authenticateToken, (req, res) => {
     purchaseAmount,
     purchasedStatus,
     name,
-    oldJobID, // For the WHERE clause
+    oldJobID,
   ];
 
-  // Start transaction
   db.getConnection((err, connection) => {
-    if (err) {
-      console.error("Error getting connection:", err);
+    if (err)
       return res
         .status(500)
-        .json({ success: false, message: "Failed to start transaction" });
-    }
+        .json({ success: false, message: "Connection failed" });
 
-    // Only check for jobID existence if the new jobID is different from the old jobID
-    if (jobID !== oldJobID) {
-      connection.query(checkJobIDQuery, [jobID], (err, results) => {
+    const updateJob = () => {
+      connection.query(updateQuery, updateData, (err) => {
         connection.release();
-        if (err) {
+        if (err)
           return res
             .status(500)
-            .json({ success: false, message: "Failed to check job ID" });
+            .json({ success: false, message: "Job update failed" });
+        res
+          .status(200)
+          .json({ success: true, message: "Job updated successfully" });
+      });
+    };
+
+    const handleCustomerCheck = () => {
+      connection.query(
+        checkCustomerQuery,
+        [customerName, mobileNo],
+        (err, results) => {
+          if (err) {
+            connection.release();
+            return res
+              .status(500)
+              .json({ success: false, message: "Customer check failed" });
+          }
+
+          if (results.length === 0) {
+            connection.query(
+              insertCustomerQuery,
+              [customerName, mobileNo],
+              (err) => {
+                if (err) {
+                  connection.release();
+                  return res.status(500).json({
+                    success: false,
+                    message: "Customer insert failed",
+                  });
+                }
+                updateJob();
+              }
+            );
+          } else {
+            updateJob();
+          }
+        }
+      );
+    };
+
+    if (jobID !== oldJobID) {
+      connection.query(checkJobIDQuery, [jobID], (err, results) => {
+        if (err) {
+          connection.release();
+          return res
+            .status(500)
+            .json({ success: false, message: "Job ID check failed" });
         }
 
         if (results.length > 0) {
+          connection.release();
           return res
             .status(400)
             .json({ success: false, message: "Job ID already exists" });
         }
 
-        // Proceed with update if jobID is unique
-        updateJobDetails();
+        handleCustomerCheck();
       });
     } else {
-      // If jobID hasn't changed, proceed directly to update
-      updateJobDetails();
+      handleCustomerCheck();
     }
   });
+});
 
-  function updateJobDetails() {
-    db.getConnection((err, connection) => {
+app.post("/editJobStatus", authenticateToken, (req, res) => {
+  const { jobID, jobStatus } = req.body;
+
+  if (!jobID || !jobStatus) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Missing jobID or jobStatus" });
+  }
+
+  const updateQuery = `UPDATE job_details SET JOB_STATUS = ? WHERE JOB_ID = ?`;
+
+  db.getConnection((err, connection) => {
+    if (err) {
+      console.error("Error getting DB connection:", err);
+      return res
+        .status(500)
+        .json({ success: false, message: "Database connection failed" });
+    }
+
+    connection.query(updateQuery, [jobStatus, jobID], (err, results) => {
+      connection.release();
+
       if (err) {
-        console.error("Error getting connection:", err);
-        return res.status(500).json({
-          success: false,
-          message: "Failed to start transaction",
-        });
+        console.error("Error executing query:", err);
+        return res
+          .status(500)
+          .json({ success: false, message: "Failed to update job status" });
       }
 
-      connection.query(updateQuery, commonData, (err) => {
-        connection.release();
-        if (err) {
-          return res.status(500).json({
-            success: false,
-            message: "Failed to update record in job_details",
-          });
-        }
+      if (results.affectedRows === 0) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Job ID not found" });
+      }
 
-        res
-          .status(200)
-          .json({ success: true, message: "Record updated successfully" });
-      });
+      return res
+        .status(200)
+        .json({ success: true, message: "Job status updated successfully" });
     });
-  }
+  });
 });
 
 app.post("/changePassword", authenticateToken, (req, res) => {
@@ -1158,7 +1306,7 @@ app.post("/resetPassword", authenticateToken, async (req, res) => {
   try {
     // Hash the new password
     const hashedPassword = await bcrypt.hash(
-      "abc@123" + process.env.SALT_KEY,
+      "Abc@123" + process.env.SALT_KEY,
       10
     );
 
@@ -1186,7 +1334,7 @@ app.post("/resetPassword", authenticateToken, async (req, res) => {
           }
 
           res.status(200).json({
-            message: `Password reset to abc@123 for user - ${userName}`,
+            message: `Password reset to Abc@123 for user - ${userName}`,
           });
         }
       );
