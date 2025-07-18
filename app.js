@@ -535,42 +535,123 @@ app.get("/pickersList", authenticateToken, (req, res) => {
 });
 
 /* Get insight */
-app.get("/insight", authenticateToken, (req, res) => {
-  const { inDateFrom, inDateTo, filter } = req.query;
+app.post("/reports", authenticateToken, (req, res) => {
+  const { inDateFrom, inDateTo, filter, admintPassword, userName, userId } =
+    req.body;
 
-  if (!inDateFrom || !inDateTo || !filter) {
-    return res
-      .status(400)
-      .json({ error: "inDateFrom, inDateTo, and filter are required" });
+  // Basic validation
+  if (
+    !inDateFrom ||
+    !inDateTo ||
+    !filter ||
+    !admintPassword ||
+    !userName ||
+    !userId
+  ) {
+    return res.status(400).json({
+      error:
+        "inDateFrom, inDateTo, filter, admintPassword, userName, and userId are required",
+    });
   }
 
-  // Convert inDateFrom and inDateTo from dd/MM/yyyy to yyyy-MM-dd
-  const convertedInDateFrom = convertDateToSQL(inDateFrom); // Convert to 'yyyy-MM-dd'
-  const convertedInDateTo = convertDateToSQL(inDateTo); // Convert to 'yyyy-MM-dd'
-
-  // Adjust the query based on the status value
-  let query = `
-    SELECT MOC as MODE,  COUNT(MOC) as COUNT
-    FROM job_details 
-    WHERE IN_DATE BETWEEN ? AND ? GROUP BY MOC
-  `;
-
-  const queryParams = [convertedInDateFrom, convertedInDateTo];
-
-  // Execute the query
+  // Step 1: Verify admin's transaction password
+  const selectQuery =
+    "SELECT TPASSWORD FROM admin WHERE USERNAME = ? AND ID = ?";
   db.getConnection((err, connection) => {
     if (err) {
       console.error("Error getting connection:", err);
-      return res.status(500).json({ error: "Internal Server Error" });
+      return res.status(500).json({ error: "Database error" });
     }
-    connection.query(query, queryParams, (err, results) => {
+
+    connection.query(selectQuery, [userName, userId], (err, results) => {
       connection.release();
       if (err) {
-        console.error("Database query error:", err);
-        return res.status(500).json({ error: "Internal Server Error" });
+        console.error("Database error:", err);
+        return res.status(500).json({ error: "Database error" });
       }
 
-      res.status(200).json(results);
+      if (!results || results.length === 0) {
+        return res.status(404).json({ error: "Admin not found" });
+      }
+
+      const storedPassword = results[0].TPASSWORD;
+
+      bcrypt.compare(
+        admintPassword + process.env.SALT_KEY,
+        storedPassword,
+        (bcryptErr, isMatch) => {
+          if (bcryptErr) {
+            console.error("Bcrypt error:", bcryptErr);
+            return res.status(500).json({ error: "Internal server error" });
+          }
+
+          if (!isMatch) {
+            return res
+              .status(400)
+              .json({ error: "Transaction password is incorrect" });
+          }
+
+          // Step 2: Continue with report generation
+          const convertedInDateFrom = convertDateToSQL(inDateFrom);
+          const convertedInDateTo = convertDateToSQL(inDateTo);
+          const queryParams = [convertedInDateFrom, convertedInDateTo];
+
+          let query = "";
+          switch (filter) {
+            case "MOC":
+              query = `
+              SELECT MOC as MODE, COUNT(MOC) as COUNT
+              FROM job_details 
+              WHERE IN_DATE BETWEEN ? AND ?
+              GROUP BY MOC
+            `;
+              break;
+
+            case "Profit":
+              query = `
+              SELECT JOB_ID, AMOUNT, PURCHASE_AMOUNT, IN_DATE, OUT_DATE
+              FROM job_details 
+              WHERE IN_DATE BETWEEN ? AND ?
+            `;
+              break;
+
+            default:
+              return res.status(400).json({ error: "Invalid filter value" });
+          }
+
+          db.getConnection((err, connection) => {
+            if (err) {
+              console.error("Error getting connection:", err);
+              return res.status(500).json({ error: "Internal Server Error" });
+            }
+
+            connection.query(query, queryParams, (err, results) => {
+              connection.release();
+
+              if (err) {
+                console.error("Database query error:", err);
+                return res.status(500).json({ error: "Internal Server Error" });
+              }
+
+              // If filter is Profit, format the dates
+              if (filter === "Profit") {
+                const modifiedResults = results.map((row) => {
+                  const { IN_DATE, OUT_DATE, ...rest } = row;
+                  return {
+                    IN_DATE: covertDateFormate(IN_DATE), // Format to 'dd-MM-yyyy'
+                    OUT_DATE: covertDateFormate(OUT_DATE), // Format to 'dd-MM-yyyy'
+                    ...rest,
+                  };
+                });
+                return res.status(200).json(modifiedResults);
+              }
+
+              // Otherwise, return as is (e.g., for MOC)
+              res.status(200).json(results);
+            });
+          });
+        }
+      );
     });
   });
 });
@@ -614,7 +695,7 @@ app.get("/searchCustomer", authenticateToken, (req, res) => {
 
 /* Get customer details */
 app.get("/customerDetails", authenticateToken, (req, res) => {
-  const query = "SELECT NAME, MOBILE, EMAIL, ADDRESS FROM customer_details";
+  const query = "SELECT ID, NAME, MOBILE, EMAIL, ADDRESS FROM customer_details";
 
   db.query(query, (err, results) => {
     if (err) {
@@ -1396,6 +1477,42 @@ app.post("/editPicker", authenticateToken, (req, res) => {
   });
 });
 
+app.put("/editCustomer", authenticateToken, (req, res) => {
+  const { id, name, mobile, email, address } = req.body;
+
+  if (!id || !name || !mobile) {
+    return res.status(400).json({ error: "ID, NAME, and MOBILE are required" });
+  }
+
+  const emailValue = email || "";
+  const addressValue = address || "";
+
+  const query = `
+    UPDATE customer_details 
+    SET NAME = ?, MOBILE = ?, EMAIL = ?, ADDRESS = ?
+    WHERE ID = ?
+  `;
+
+  db.query(
+    query,
+    [name, mobile, emailValue, addressValue, id],
+    (err, result) => {
+      if (err) {
+        console.error("Error updating customer:", err);
+        return res.status(500).json({ error: "Internal server error" });
+      }
+
+      if (result.affectedRows === 0) {
+        return res
+          .status(404)
+          .json({ message: "Customer not found or no changes made" });
+      }
+
+      res.json({ message: "Customer updated successfully" });
+    }
+  );
+});
+
 /* Delete Queries */
 app.post("/deleteUser", authenticateToken, async (req, res) => {
   const { userName, position } = req.body;
@@ -1537,6 +1654,28 @@ app.post("/deletePicker", authenticateToken, async (req, res) => {
     console.error("Unexpected error:", error);
     res.status(500).json({ message: "Internal server error" });
   }
+});
+
+app.delete("/deleteCustomer", authenticateToken, (req, res) => {
+  const { name, mobile } = req.body;
+
+  if (!name || !mobile) {
+    return res.status(400).json({ error: "Name and mobile are required" });
+  }
+
+  const query = "DELETE FROM customer_details WHERE NAME = ? AND MOBILE = ?";
+  db.query(query, [name, mobile], (err, result) => {
+    if (err) {
+      console.error("Error deleting customer:", err);
+      return res.status(500).json({ error: "Internal server error" });
+    }
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: "Customer not found" });
+    }
+
+    res.json({ message: "Customer deleted successfully" });
+  });
 });
 
 // Centralized error handler
