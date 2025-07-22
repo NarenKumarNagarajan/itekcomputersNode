@@ -1,13 +1,11 @@
 import express from "express";
 import cors from "cors";
-import mysql from "mysql";
 import bodyParser from "body-parser";
 import dotenv from "dotenv";
 import { format, startOfMonth, endOfMonth, parse } from "date-fns";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import moment from "moment-timezone";
-import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { body, validationResult } from "express-validator";
 import mysql2 from "mysql2";
@@ -83,37 +81,6 @@ const covertDateFormate = (dateInput) => {
   return formattedDate;
 };
 
-/* const createAdmin = async () => {
-  try {
-    // Encrypt the password and tpassword
-    const hashedPassword = await bcrypt.hash("1234" + process.env.SALT_KEY, 10);
-    const hashedTPassword = await bcrypt.hash("1234" + process.env.SALT_KEY, 10);
-
-    const insertQuery = `
-      INSERT INTO admin (USERNAME, PASSWORD, TPASSWORD, NAME)
-      VALUES (?, ?, ?, ?)
-    `;
-
-    db.query(
-      insertQuery,
-      ["kavi", hashedPassword, hashedTPassword, "Kaviyarasan J"],
-      (err, result) => {
-        if (err) {
-          console.error("Error inserting into admin table:", err);
-          return res
-            .status(500)
-            .json({ error: "Failed to insert into admin table" });
-        }
-
-        console.log("Admin record inserted successfully");
-      }
-    );
-  } catch (error) {
-    console.error("Error hashing passwords:", error);
-    res.status(500).json({ error: "Failed to hash passwords" });
-  }
-}; */
-
 // Add rate limiting (e.g., 100 requests per 15 minutes per IP)
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -187,7 +154,7 @@ app.post(
                   { USERNAME },
                   process.env.JWT_SECRET,
                   {
-                    expiresIn: "180m",
+                    expiresIn: "1d",
                   }
                 );
                 return res.status(200).json({
@@ -549,8 +516,7 @@ app.post("/reports", authenticateToken, (req, res) => {
     !userId
   ) {
     return res.status(400).json({
-      error:
-        "inDateFrom, inDateTo, filter, admintPassword, userName, and userId are required",
+      error: "From Date, To Date, Filter Type, Password are required",
     });
   }
 
@@ -609,7 +575,7 @@ app.post("/reports", authenticateToken, (req, res) => {
 
             case "Profit":
               query = `
-              SELECT JOB_ID, AMOUNT, PURCHASE_AMOUNT, IN_DATE, OUT_DATE
+              SELECT JOB_ID, NAME, AMOUNT, PURCHASE_AMOUNT, IN_DATE
               FROM job_details 
               WHERE IN_DATE BETWEEN ? AND ?
             `;
@@ -636,10 +602,9 @@ app.post("/reports", authenticateToken, (req, res) => {
               // If filter is Profit, format the dates
               if (filter === "Profit") {
                 const modifiedResults = results.map((row) => {
-                  const { IN_DATE, OUT_DATE, ...rest } = row;
+                  const { IN_DATE, ...rest } = row;
                   return {
                     IN_DATE: covertDateFormate(IN_DATE), // Format to 'dd-MM-yyyy'
-                    OUT_DATE: covertDateFormate(OUT_DATE), // Format to 'dd-MM-yyyy'
                     ...rest,
                   };
                 });
@@ -710,7 +675,7 @@ app.get("/customerDetails", authenticateToken, (req, res) => {
 /* end of Get data queries code */
 
 /* Insert data into job_details and backup */
-app.post("/insert", authenticateToken, (req, res) => {
+app.post("/insertJob", authenticateToken, (req, res) => {
   const {
     jobID,
     customerName,
@@ -1686,5 +1651,5 @@ app.use((err, req, res, next) => {
 
 /* Start server */
 app.listen(port, () => {
-  console.log(`Server is running on http://localhost:${port}`);
+  console.log(`Server is running on ${port}`);
 });
