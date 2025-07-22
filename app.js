@@ -693,6 +693,8 @@ app.post("/insertJob", authenticateToken, (req, res) => {
     jobStatus,
     amount,
     solutionProvided,
+    purchaseAmount,
+    purchasedStatus,
     inDate,
     outDate,
     name,
@@ -711,8 +713,8 @@ app.post("/insertJob", authenticateToken, (req, res) => {
     INSERT INTO job_details 
     (JOB_ID, NAME, MOBILE, EMAIL, ADDRESS, ENGINEER, MOC, IN_DATE, OUT_DATE, 
      ASSETS, PRODUCT_MAKE, DESCRIPTION, SERIAL_NO, FAULT_TYPE, FAULT_DESC, 
-     JOB_STATUS, AMOUNT, SOLUTION_PROVIDED, CREATED, LAST_MODIFIED) 
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     JOB_STATUS, AMOUNT, SOLUTION_PROVIDED, PURCHASE_AMOUNT, PURCHASED, CREATED, LAST_MODIFIED) 
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `;
 
   const jobData = [
@@ -734,6 +736,8 @@ app.post("/insertJob", authenticateToken, (req, res) => {
     jobStatus,
     amount,
     solutionProvided,
+    purchaseAmount,
+    purchasedStatus,
     name,
     name,
   ];
@@ -980,7 +984,6 @@ app.post("/editJob", authenticateToken, (req, res) => {
     solutionProvided,
     amount,
     purchaseAmount,
-    purchasedStatus,
     name,
   } = req.body;
 
@@ -998,7 +1001,7 @@ app.post("/editJob", authenticateToken, (req, res) => {
     SET JOB_ID = ?, NAME = ?, MOBILE = ?, EMAIL = ?, ADDRESS = ?, ENGINEER = ?, MOC = ?, 
         IN_DATE = ?, OUT_DATE = ?, ASSETS = ?, PRODUCT_MAKE = ?, DESCRIPTION = ?, 
         SERIAL_NO = ?, FAULT_TYPE = ?, FAULT_DESC = ?, JOB_STATUS = ?, AMOUNT = ?, 
-        SOLUTION_PROVIDED = ?, PURCHASE_AMOUNT=?, PURCHASED=?, LAST_MODIFIED=? 
+        SOLUTION_PROVIDED = ?, PURCHASE_AMOUNT=?, LAST_MODIFIED=? 
     WHERE JOB_ID = ?
   `;
 
@@ -1022,7 +1025,6 @@ app.post("/editJob", authenticateToken, (req, res) => {
     amount,
     solutionProvided,
     purchaseAmount,
-    purchasedStatus,
     name,
     oldJobID,
   ];
