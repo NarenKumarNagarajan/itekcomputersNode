@@ -575,7 +575,7 @@ app.post("/reports", authenticateToken, (req, res) => {
 
             case "Profit":
               query = `
-              SELECT JOB_ID, NAME, AMOUNT, PURCHASE_AMOUNT, IN_DATE
+              SELECT ID, JOB_ID, NAME, AMOUNT, PURCHASE_AMOUNT, IN_DATE
               FROM job_details 
               WHERE IN_DATE BETWEEN ? AND ?
             `;
@@ -601,13 +601,16 @@ app.post("/reports", authenticateToken, (req, res) => {
 
               // If filter is Profit, format the dates
               if (filter === "Profit") {
-                const modifiedResults = results.map((row) => {
-                  const { IN_DATE, ...rest } = row;
-                  return {
-                    IN_DATE: covertDateFormate(IN_DATE), // Format to 'dd-MM-yyyy'
-                    ...rest,
-                  };
-                });
+                const modifiedResults = results
+                  .map((row) => {
+                    const { IN_DATE, ...rest } = row;
+                    return {
+                      IN_DATE: covertDateFormate(IN_DATE), // Format to 'dd-MM-yyyy'
+                      ...rest,
+                    };
+                  })
+                  .reverse(); // ⬅️ This reverses the array
+
                 return res.status(200).json(modifiedResults);
               }
 
@@ -1025,23 +1028,35 @@ app.post("/editJob", authenticateToken, (req, res) => {
     amount,
     solutionProvided,
     purchaseAmount,
-    name,
+    new Date(), // changed from `name` to proper LAST_MODIFIED timestamp
     oldJobID,
   ];
 
   db.getConnection((err, connection) => {
-    if (err)
+    if (err) {
+      console.error("DB Connection Error:", err);
       return res
         .status(500)
-        .json({ success: false, message: "Connection failed" });
+        .json({
+          success: false,
+          message: "Connection failed",
+          error: err.message,
+        });
+    }
 
     const updateJob = () => {
       connection.query(updateQuery, updateData, (err) => {
         connection.release();
-        if (err)
+        if (err) {
+          console.error("Update Job Error:", err);
           return res
             .status(500)
-            .json({ success: false, message: "Job update failed" });
+            .json({
+              success: false,
+              message: "Job update failed",
+              error: err.message,
+            });
+        }
         res
           .status(200)
           .json({ success: true, message: "Job updated successfully" });
@@ -1055,9 +1070,14 @@ app.post("/editJob", authenticateToken, (req, res) => {
         (err, results) => {
           if (err) {
             connection.release();
+            console.error("Customer Check Error:", err);
             return res
               .status(500)
-              .json({ success: false, message: "Customer check failed" });
+              .json({
+                success: false,
+                message: "Customer check failed",
+                error: err.message,
+              });
           }
 
           if (results.length === 0) {
@@ -1067,10 +1087,14 @@ app.post("/editJob", authenticateToken, (req, res) => {
               (err) => {
                 if (err) {
                   connection.release();
-                  return res.status(500).json({
-                    success: false,
-                    message: "Customer insert failed",
-                  });
+                  console.error("Customer Insert Error:", err);
+                  return res
+                    .status(500)
+                    .json({
+                      success: false,
+                      message: "Customer insert failed",
+                      error: err.message,
+                    });
                 }
                 updateJob();
               }
@@ -1086,9 +1110,14 @@ app.post("/editJob", authenticateToken, (req, res) => {
       connection.query(checkJobIDQuery, [jobID], (err, results) => {
         if (err) {
           connection.release();
+          console.error("Job ID Check Error:", err);
           return res
             .status(500)
-            .json({ success: false, message: "Job ID check failed" });
+            .json({
+              success: false,
+              message: "Job ID check failed",
+              error: err.message,
+            });
         }
 
         if (results.length > 0) {
