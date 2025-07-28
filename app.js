@@ -1028,20 +1028,18 @@ app.post("/editJob", authenticateToken, (req, res) => {
     amount,
     solutionProvided,
     purchaseAmount,
-    new Date(), // changed from `name` to proper LAST_MODIFIED timestamp
+    name,
     oldJobID,
   ];
 
   db.getConnection((err, connection) => {
     if (err) {
       console.error("DB Connection Error:", err);
-      return res
-        .status(500)
-        .json({
-          success: false,
-          message: "Connection failed",
-          error: err.message,
-        });
+      return res.status(500).json({
+        success: false,
+        message: "Connection failed",
+        error: err.message,
+      });
     }
 
     const updateJob = () => {
@@ -1049,13 +1047,11 @@ app.post("/editJob", authenticateToken, (req, res) => {
         connection.release();
         if (err) {
           console.error("Update Job Error:", err);
-          return res
-            .status(500)
-            .json({
-              success: false,
-              message: "Job update failed",
-              error: err.message,
-            });
+          return res.status(500).json({
+            success: false,
+            message: "Job update failed",
+            error: err.message,
+          });
         }
         res
           .status(200)
@@ -1071,13 +1067,11 @@ app.post("/editJob", authenticateToken, (req, res) => {
           if (err) {
             connection.release();
             console.error("Customer Check Error:", err);
-            return res
-              .status(500)
-              .json({
-                success: false,
-                message: "Customer check failed",
-                error: err.message,
-              });
+            return res.status(500).json({
+              success: false,
+              message: "Customer check failed",
+              error: err.message,
+            });
           }
 
           if (results.length === 0) {
@@ -1088,13 +1082,11 @@ app.post("/editJob", authenticateToken, (req, res) => {
                 if (err) {
                   connection.release();
                   console.error("Customer Insert Error:", err);
-                  return res
-                    .status(500)
-                    .json({
-                      success: false,
-                      message: "Customer insert failed",
-                      error: err.message,
-                    });
+                  return res.status(500).json({
+                    success: false,
+                    message: "Customer insert failed",
+                    error: err.message,
+                  });
                 }
                 updateJob();
               }
@@ -1111,13 +1103,11 @@ app.post("/editJob", authenticateToken, (req, res) => {
         if (err) {
           connection.release();
           console.error("Job ID Check Error:", err);
-          return res
-            .status(500)
-            .json({
-              success: false,
-              message: "Job ID check failed",
-              error: err.message,
-            });
+          return res.status(500).json({
+            success: false,
+            message: "Job ID check failed",
+            error: err.message,
+          });
         }
 
         if (results.length > 0) {
@@ -1507,6 +1497,50 @@ app.put("/editCustomer", authenticateToken, (req, res) => {
       res.json({ message: "Customer updated successfully" });
     }
   );
+});
+
+app.post("/reportsUpdate", authenticateToken, (req, res) => {
+  const { jobID, amount, purchase } = req.body;
+
+  if (!jobID || !amount || !purchase) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Missing jobID, amount or purchase" });
+  }
+
+  const updateQuery = `UPDATE job_details SET AMOUNT = ?, PURCHASE_AMOUNT = ? WHERE JOB_ID = ?`;
+
+  db.getConnection((err, connection) => {
+    if (err) {
+      console.error("Error getting DB connection:", err);
+      return res
+        .status(500)
+        .json({ success: false, message: "Database connection failed" });
+    }
+
+    connection.query(updateQuery, [amount, purchase, jobID], (err, results) => {
+      connection.release();
+
+      if (err) {
+        console.error("Error executing query:", err);
+        return res.status(500).json({
+          success: false,
+          message: "Failed to update Purchase and amount",
+        });
+      }
+
+      if (results.affectedRows === 0) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Job ID not found" });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: "Expense and Amount Updated Successfully",
+      });
+    });
+  });
 });
 
 /* Delete Queries */
