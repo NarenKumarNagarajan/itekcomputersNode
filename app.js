@@ -1,15 +1,14 @@
-import express from "express";
 import cors from "cors";
-import bodyParser from "body-parser";
 import dotenv from "dotenv";
-import { format, startOfMonth, endOfMonth, parse } from "date-fns";
+import mysql2 from "mysql2";
 import bcrypt from "bcrypt";
+import express from "express";
 import jwt from "jsonwebtoken";
+import bodyParser from "body-parser";
 import moment from "moment-timezone";
 import rateLimit from "express-rate-limit";
 import { body, validationResult } from "express-validator";
-import mysql2 from "mysql2";
-import { pickerTableName } from "./constants.js";
+import { format, startOfMonth, endOfMonth, parse, isValid } from "date-fns";
 
 dotenv.config();
 
@@ -54,31 +53,62 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+const pickerTableName = {
+  ENGINEER: "engineers",
+  MOC: "moc",
+  ASSET: "assets",
+  PRODUCT: "products",
+  FAULT: "faults",
+  STATUS: "status",
+};
+
+// ✅ Convert frontend input to SQL format: "2025-08-04 15:44:00"
 const convertDateToSQL = (dateString) => {
   try {
-    // Parse 'dd/MM/yyyy' string to a date object
-    const parsedDate = parse(dateString, "dd/MM/yyyy", new Date());
+    // Parse string like "04/08/2025 03:44 PM"
+    const parsedDate = parse(dateString, "dd/MM/yyyy hh:mm a", new Date());
 
-    // Check if the date is valid
-    if (isNaN(parsedDate)) {
+    if (!isValid(parsedDate)) {
       throw new Error("Invalid date format");
     }
 
-    // Format the parsed date to 'yyyy-MM-dd'
-    return format(parsedDate, "yyyy-MM-dd");
+    // Format to SQL datetime: "2025-08-04 15:44:00"
+    return format(parsedDate, "yyyy-MM-dd HH:mm:ss");
   } catch (error) {
     console.error("Error in convertDateToSQL:", error.message);
     throw new Error("Invalid date provided");
   }
 };
 
+// ✅ Convert SQL datetime to frontend format: "04/08/2025 03:44 PM"
 const covertDateFormate = (dateInput) => {
-  // Ensure that the input is a valid date object
-  const date = new Date(dateInput);
+  try {
+    const date = new Date(dateInput);
 
-  // Format the date to 'dd-MM-yyyy'
-  const formattedDate = format(date, "dd-MM-yyyy");
-  return formattedDate;
+    if (!isValid(date)) {
+      throw new Error("Invalid SQL date input");
+    }
+
+    // Format to "04/08/2025 03:44 PM"
+    return format(date, "dd/MM/yyyy hh:mm a");
+  } catch (error) {
+    console.error("Error in covertDateFormate:", error.message);
+    throw new Error("Invalid date input");
+  }
+};
+
+const updateTimeToNow = (originalDateStr) => {
+  // Parse original date from DB (e.g., '2025-08-04 15:44:00')
+  const originalDate = new Date(originalDateStr);
+  if (!isValid(originalDate)) return "";
+
+  const now = new Date();
+
+  // Replace time with current time
+  originalDate.setHours(now.getHours(), now.getMinutes(), 0, 0);
+
+  // Format as "dd/MM/yyyy hh:mm a"
+  return format(originalDate, "dd/MM/yyyy hh:mm a");
 };
 
 // Add rate limiting (e.g., 100 requests per 15 minutes per IP)
@@ -88,6 +118,7 @@ const limiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
+
 app.use(limiter);
 
 app.post(
@@ -253,7 +284,7 @@ app.get("/jobID", authenticateToken, (req, res) => {
 
   const query = `
     SELECT JOB_ID 
-    FROM job_details 
+    FROM jobs 
     WHERE IN_DATE BETWEEN ? AND ?
     ORDER BY ID DESC 
     LIMIT 1
@@ -287,17 +318,15 @@ app.get("/jobID", authenticateToken, (req, res) => {
 
 /* Get engineerPicker, mocPicker, assetsPicker, productPicker, faultPicker, jobStatusPicker */
 app.get("/jobSheetPickers", authenticateToken, (req, res) => {
-  // Queries to fetch data from each table
   const queries = {
     engineers: "SELECT NAME FROM engineers",
     moc: "SELECT NAME FROM moc",
-    assets_type: "SELECT NAME FROM assets_type",
-    products: "SELECT NAME FROM products",
+    assets_type: "SELECT NAME FROM assets",
+    products: "SELECT NAME, ASSET FROM products",
     faults: "SELECT NAME FROM faults",
-    job_status: "SELECT NAME FROM job_status",
+    job_status: "SELECT NAME FROM status",
   };
 
-  // Execute all queries concurrently using Promise.all
   const queryPromises = Object.entries(queries).map(([key, query]) => {
     return new Promise((resolve, reject) => {
       db.getConnection((err, connection) => {
@@ -309,7 +338,11 @@ app.get("/jobSheetPickers", authenticateToken, (req, res) => {
             if (err) {
               reject({ key, error: err });
             } else {
-              resolve({ key, data: results.map((row) => row.NAME) }); // Map results to array of names
+              const data =
+                key === "products"
+                  ? results.map((row) => ({ name: row.NAME, asset: row.ASSET }))
+                  : results.map((row) => row.NAME);
+              resolve({ key, data });
             }
           });
         }
@@ -319,12 +352,10 @@ app.get("/jobSheetPickers", authenticateToken, (req, res) => {
 
   Promise.all(queryPromises)
     .then((results) => {
-      // Combine results into the desired format
       const responseData = results.reduce((acc, result) => {
         acc[result.key] = result.data;
         return acc;
       }, {});
-
       res.json(responseData);
     })
     .catch((err) => {
@@ -341,7 +372,7 @@ app.get("/printData", authenticateToken, (req, res) => {
     return res.status(400).json({ error: "jobID is required" });
   }
 
-  const query = "SELECT * FROM job_details WHERE JOB_ID = ?";
+  const query = "SELECT * FROM jobs WHERE JOB_ID = ?";
 
   db.getConnection((err, connection) => {
     if (err) {
@@ -362,7 +393,7 @@ app.get("/printData", authenticateToken, (req, res) => {
       const formattedResults = results.map((result) => ({
         ...result,
         IN_DATE: covertDateFormate(result.IN_DATE),
-        OUT_DATE: covertDateFormate(result.OUT_DATE),
+        OUT_DATE: updateTimeToNow(result.OUT_DATE),
       }));
 
       res.json(formattedResults);
@@ -387,7 +418,7 @@ app.get("/allData", authenticateToken, (req, res) => {
   // Adjust the query based on the status value
   let query = `
     SELECT * 
-    FROM job_details 
+    FROM jobs 
     WHERE IN_DATE BETWEEN ? AND ?
   `;
 
@@ -567,7 +598,7 @@ app.post("/reports", authenticateToken, (req, res) => {
             case "MOC":
               query = `
               SELECT MOC as MODE, COUNT(MOC) as COUNT
-              FROM job_details 
+              FROM jobs 
               WHERE IN_DATE BETWEEN ? AND ?
               GROUP BY MOC
             `;
@@ -576,7 +607,7 @@ app.post("/reports", authenticateToken, (req, res) => {
             case "Profit":
               query = `
               SELECT ID, JOB_ID, NAME, AMOUNT, PURCHASE_AMOUNT, IN_DATE
-              FROM job_details 
+              FROM jobs 
               WHERE IN_DATE BETWEEN ? AND ?
             `;
               break;
@@ -634,8 +665,7 @@ app.get("/searchCustomer", authenticateToken, (req, res) => {
       .json({ error: "Please provide mobile or name for search" });
   }
 
-  let query =
-    "SELECT NAME, MOBILE, EMAIL, ADDRESS FROM customer_details WHERE ";
+  let query = "SELECT NAME, MOBILE, EMAIL, ADDRESS FROM customers WHERE ";
   const conditions = [];
   const params = [];
 
@@ -663,7 +693,7 @@ app.get("/searchCustomer", authenticateToken, (req, res) => {
 
 /* Get customer details */
 app.get("/customerDetails", authenticateToken, (req, res) => {
-  const query = "SELECT ID, NAME, MOBILE, EMAIL, ADDRESS FROM customer_details";
+  const query = "SELECT ID, NAME, MOBILE, EMAIL, ADDRESS FROM customers";
 
   db.query(query, (err, results) => {
     if (err) {
@@ -677,7 +707,7 @@ app.get("/customerDetails", authenticateToken, (req, res) => {
 
 /* end of Get data queries code */
 
-/* Insert data into job_details and backup */
+/* Insert data into jobs and backup */
 app.post("/insertJob", authenticateToken, (req, res) => {
   const {
     jobID,
@@ -706,14 +736,14 @@ app.post("/insertJob", authenticateToken, (req, res) => {
   const convertedInDate = convertDateToSQL(inDate);
   const convertedOutDate = convertDateToSQL(outDate);
 
-  const checkJobIDQuery = "SELECT 1 FROM job_details WHERE JOB_ID = ? LIMIT 1";
+  const checkJobIDQuery = "SELECT 1 FROM jobs WHERE JOB_ID = ? LIMIT 1";
   const checkCustomerQuery =
-    "SELECT 1 FROM customer_details WHERE NAME = ? AND MOBILE = ? LIMIT 1";
+    "SELECT 1 FROM customers WHERE NAME = ? AND MOBILE = ? LIMIT 1";
   const insertCustomerQuery =
-    "INSERT INTO customer_details (NAME, MOBILE, EMAIL, ADDRESS) VALUES (?, ?, ?, ?)";
+    "INSERT INTO customers (NAME, MOBILE, EMAIL, ADDRESS) VALUES (?, ?, ?, ?)";
 
   const insertJobQuery = `
-    INSERT INTO job_details 
+    INSERT INTO jobs 
     (JOB_ID, NAME, MOBILE, EMAIL, ADDRESS, ENGINEER, MOC, IN_DATE, OUT_DATE, 
      ASSETS, PRODUCT_MAKE, DESCRIPTION, SERIAL_NO, FAULT_TYPE, FAULT_DESC, 
      JOB_STATUS, AMOUNT, SOLUTION_PROVIDED, PURCHASE_AMOUNT, PURCHASED, CREATED, LAST_MODIFIED) 
@@ -993,14 +1023,14 @@ app.post("/editJob", authenticateToken, (req, res) => {
   const convertedInDate = convertDateToSQL(inDate);
   const convertedOutDate = convertDateToSQL(outDate);
 
-  const checkJobIDQuery = "SELECT 1 FROM job_details WHERE JOB_ID = ? LIMIT 1";
+  const checkJobIDQuery = "SELECT 1 FROM jobs WHERE JOB_ID = ? LIMIT 1";
   const checkCustomerQuery =
-    "SELECT 1 FROM customer_details WHERE NAME = ? AND MOBILE = ? LIMIT 1";
+    "SELECT 1 FROM customers WHERE NAME = ? AND MOBILE = ? LIMIT 1";
   const insertCustomerQuery =
-    "INSERT INTO customer_details (NAME, MOBILE) VALUES (?, ?)";
+    "INSERT INTO customers (NAME, MOBILE) VALUES (?, ?)";
 
   const updateQuery = `
-    UPDATE job_details 
+    UPDATE jobs 
     SET JOB_ID = ?, NAME = ?, MOBILE = ?, EMAIL = ?, ADDRESS = ?, ENGINEER = ?, MOC = ?, 
         IN_DATE = ?, OUT_DATE = ?, ASSETS = ?, PRODUCT_MAKE = ?, DESCRIPTION = ?, 
         SERIAL_NO = ?, FAULT_TYPE = ?, FAULT_DESC = ?, JOB_STATUS = ?, AMOUNT = ?, 
@@ -1134,7 +1164,7 @@ app.post("/editJobStatus", authenticateToken, (req, res) => {
       .json({ success: false, message: "Missing jobID or jobStatus" });
   }
 
-  const updateQuery = `UPDATE job_details SET JOB_STATUS = ? WHERE JOB_ID = ?`;
+  const updateQuery = `UPDATE jobs SET JOB_STATUS = ? WHERE JOB_ID = ?`;
 
   db.getConnection((err, connection) => {
     if (err) {
@@ -1464,7 +1494,7 @@ app.post("/editPicker", authenticateToken, (req, res) => {
 });
 
 app.put("/editCustomer", authenticateToken, (req, res) => {
-  const { id, name, mobile, email, address } = req.body;
+  const { name, oldName, mobile, oldMobile, email, address } = req.body;
 
   if (!id || !name || !mobile) {
     return res.status(400).json({ error: "ID, NAME, and MOBILE are required" });
@@ -1473,28 +1503,50 @@ app.put("/editCustomer", authenticateToken, (req, res) => {
   const emailValue = email || "";
   const addressValue = address || "";
 
-  const query = `
-    UPDATE customer_details 
+  const updateCustomerQuery = `
+    UPDATE customers 
     SET NAME = ?, MOBILE = ?, EMAIL = ?, ADDRESS = ?
-    WHERE ID = ?
+    WHERE  NAME = ? AND MOBILE = ?
   `;
 
   db.query(
-    query,
-    [name, mobile, emailValue, addressValue, id],
-    (err, result) => {
+    updateCustomerQuery,
+    [name, mobile, emailValue, addressValue, id, oldName, oldMobile],
+    (err, customerResult) => {
       if (err) {
         console.error("Error updating customer:", err);
         return res.status(500).json({ error: "Internal server error" });
       }
 
-      if (result.affectedRows === 0) {
+      if (customerResult.affectedRows === 0) {
         return res
           .status(404)
           .json({ message: "Customer not found or no changes made" });
       }
 
-      res.json({ message: "Customer updated successfully" });
+      // Update jobs where old name and mobile exist
+      const updateJobQuery = `
+        UPDATE jobs 
+        SET NAME = ?, MOBILE = ?
+        WHERE NAME = ? AND MOBILE = ?
+      `;
+
+      db.query(
+        updateJobQuery,
+        [name, mobile, oldName, oldMobile],
+        (jobErr, jobResult) => {
+          if (jobErr) {
+            console.error("Error updating jobs:", jobErr);
+            return res.status(500).json({
+              error: "Customer updated, but failed to update job details",
+            });
+          }
+
+          res.json({
+            message: "Customer and job details updated successfully",
+          });
+        }
+      );
     }
   );
 });
@@ -1508,7 +1560,7 @@ app.post("/reportsUpdate", authenticateToken, (req, res) => {
       .json({ success: false, message: "Missing jobID, amount or purchase" });
   }
 
-  const updateQuery = `UPDATE job_details SET AMOUNT = ?, PURCHASE_AMOUNT = ? WHERE JOB_ID = ?`;
+  const updateQuery = `UPDATE jobs SET AMOUNT = ?, PURCHASE_AMOUNT = ? WHERE JOB_ID = ?`;
 
   db.getConnection((err, connection) => {
     if (err) {
@@ -1605,7 +1657,7 @@ app.post("/deleteJob", authenticateToken, async (req, res) => {
 
   try {
     // Prepare the delete query
-    const deleteQuery = "DELETE FROM job_details WHERE JOB_ID = ?";
+    const deleteQuery = "DELETE FROM jobs WHERE JOB_ID = ?";
 
     // Execute the delete query
     db.getConnection((err, connection) => {
@@ -1693,7 +1745,7 @@ app.delete("/deleteCustomer", authenticateToken, (req, res) => {
     return res.status(400).json({ error: "Name and mobile are required" });
   }
 
-  const query = "DELETE FROM customer_details WHERE NAME = ? AND MOBILE = ?";
+  const query = "DELETE FROM customers WHERE NAME = ? AND MOBILE = ?";
   db.query(query, [name, mobile], (err, result) => {
     if (err) {
       console.error("Error deleting customer:", err);
