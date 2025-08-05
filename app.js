@@ -499,36 +499,80 @@ app.get("/userList", authenticateToken, (req, res) => {
 app.get("/pickersList", authenticateToken, (req, res) => {
   const { menuSelected } = req.query;
 
-  // Validate menuSelected
-  if (!pickerTableName[menuSelected]) {
+  const tableName = pickerTableName[menuSelected];
+  if (!tableName) {
     return res.status(400).json({ error: "Invalid menuSelected value" });
   }
 
-  // Construct the query
-  const query = `SELECT NAME FROM ${pickerTableName[menuSelected]}`;
+  const pickerQuery =
+    menuSelected === "PRODUCT"
+      ? `SELECT NAME, ASSET FROM ${tableName}`
+      : `SELECT NAME FROM ${tableName}`;
 
-  // Execute the query
+  // Open DB connection
   db.getConnection((err, connection) => {
     if (err) {
-      console.error("Error getting connection:", err);
-      return res.status(500).json({ error: "Internal Server Error" });
+      console.error("Error getting DB connection:", err);
+      return res.status(500).json({ error: "Database connection failed" });
     }
-    connection.query(query, (err, results) => {
-      connection.release();
-      if (err) {
-        console.error("Database query error:", err);
-        return res.status(500).json({ error: "Internal Server Error" });
-      }
 
-      // If no results found
-      if (results.length === 0) {
-        return res.status(404).json({ message: "No data found" });
-      }
+    if (menuSelected === "PRODUCT") {
+      // Run both queries in parallel
+      const assetsQuery = `SELECT NAME FROM assets`;
 
-      // Send the results as an array of names
-      const names = results.map((row) => row.NAME);
-      res.status(200).json(names);
-    });
+      connection.query(assetsQuery, (err, assetsResult) => {
+        if (err) {
+          connection.release();
+          console.error("Error fetching assets:", err);
+          return res.status(500).json({ error: "Failed to fetch assets" });
+        }
+
+        const assets = assetsResult.map((row) => row.NAME);
+
+        connection.query(pickerQuery, (err, pickerResults) => {
+          connection.release();
+
+          if (err) {
+            console.error("Error fetching products:", err);
+            return res.status(500).json({ error: "Failed to fetch products" });
+          }
+
+          if (!pickerResults.length) {
+            return res.status(404).json({ message: "No product data found" });
+          }
+
+          const grouped = {};
+
+          pickerResults.forEach(({ NAME, ASSET }) => {
+            if (!grouped[ASSET]) {
+              grouped[ASSET] = [];
+            }
+            if (!grouped[ASSET].includes(NAME)) {
+              grouped[ASSET].push(NAME);
+            }
+          });
+
+          return res.status(200).json([{ assets }, grouped]);
+        });
+      });
+    } else {
+      // For non-PRODUCT menus
+      connection.query(pickerQuery, (err, results) => {
+        connection.release();
+
+        if (err) {
+          console.error("Query error:", err);
+          return res.status(500).json({ error: "Query failed" });
+        }
+
+        if (!results.length) {
+          return res.status(404).json({ message: "No data found" });
+        }
+
+        const names = results.map((row) => row.NAME);
+        return res.status(200).json(names);
+      });
+    }
   });
 });
 
@@ -835,9 +879,16 @@ app.post("/insertJob", authenticateToken, (req, res) => {
 
 /* insert picker */
 app.post("/insertPicker", authenticateToken, (req, res) => {
-  const { menuSelected, pickerName } = req.body;
-  const checkPickerQuery = `SELECT 1 FROM ${pickerTableName[menuSelected]} WHERE NAME = ? LIMIT 1`;
-  const insertQuery = `INSERT INTO ${pickerTableName[menuSelected]} (NAME) VALUES (?)`;
+  const { menuSelected, pickerName, selectedAssets } = req.body;
+
+  const checkPickerQuery =
+    menuSelected === "PRODUCT"
+      ? `SELECT 1 FROM ${pickerTableName[menuSelected]} WHERE NAME = ? AND ASSET = ? LIMIT 1`
+      : `SELECT 1 FROM ${pickerTableName[menuSelected]} WHERE NAME = ? LIMIT 1`;
+  const insertQuery =
+    menuSelected === "PRODUCT"
+      ? `INSERT INTO ${pickerTableName[menuSelected]} (NAME, ASSET) VALUES (?, ?)`
+      : `INSERT INTO ${pickerTableName[menuSelected]} (NAME) VALUES (?)`;
 
   db.getConnection((err, connection) => {
     if (err) {
@@ -845,25 +896,59 @@ app.post("/insertPicker", authenticateToken, (req, res) => {
       return res.status(500).json({ error: "Transaction failed to start" });
     }
 
-    connection.query(checkPickerQuery, [pickerName], (err, results) => {
-      connection.release();
-      if (err) {
-        return res.status(500).json({ error: "Error checking picker name" });
-      }
+    if (menuSelected === "PRODUCT") {
+      connection.query(
+        checkPickerQuery,
+        [pickerName, selectedAssets],
+        (err, results) => {
+          connection.release();
+          if (err) {
+            return res
+              .status(500)
+              .json({ error: "Error checking picker name" });
+          }
 
-      if (results.length > 0) {
-        return res.status(400).json({ error: "Picker name already exists" });
-      }
+          if (results.length > 0) {
+            return res
+              .status(400)
+              .json({ error: "Picker name already exists" });
+          }
 
-      // Insert new picker name
-      connection.query(insertQuery, [pickerName], (err) => {
+          // Insert new picker name
+          connection.query(insertQuery, [pickerName, selectedAssets], (err) => {
+            if (err) {
+              return res
+                .status(500)
+                .json({ error: "Error inserting picker name" });
+            }
+
+            res.json({ message: "Picker details inserted successfully" });
+          });
+        }
+      );
+    } else {
+      connection.query(checkPickerQuery, [pickerName], (err, results) => {
+        connection.release();
         if (err) {
-          return res.status(500).json({ error: "Error inserting picker name" });
+          return res.status(500).json({ error: "Error checking picker name" });
         }
 
-        res.json({ message: "Picker details inserted successfully" });
+        if (results.length > 0) {
+          return res.status(400).json({ error: "Picker name already exists" });
+        }
+
+        // Insert new picker name
+        connection.query(insertQuery, [pickerName], (err) => {
+          if (err) {
+            return res
+              .status(500)
+              .json({ error: "Error inserting picker name" });
+          }
+
+          res.json({ message: "Picker details inserted successfully" });
+        });
       });
-    });
+    }
   });
 });
 
@@ -1443,14 +1528,25 @@ app.post("/resetPassword", authenticateToken, async (req, res) => {
 });
 
 app.post("/editPicker", authenticateToken, (req, res) => {
-  const { menuSelected, oldPicker, newPicker, position } = req.body;
+  const { menuSelected, oldPicker, newPicker, position, selectedAssets } =
+    req.body;
 
   if (position !== "ADMIN") {
     return res.status(403).json({ message: "Unauthorized access" });
   }
 
-  const checkPickerExistsQuery = `SELECT 1 FROM ${pickerTableName[menuSelected]} WHERE NAME = ? LIMIT 1`;
-  const updateQuery = `
+  const checkPickerExistsQuery =
+    menuSelected === "PRODUCT"
+      ? `SELECT 1 FROM ${pickerTableName[menuSelected]} WHERE NAME = ? AND ASSET = ? LIMIT 1`
+      : `SELECT 1 FROM ${pickerTableName[menuSelected]} WHERE NAME = ? LIMIT 1`;
+  const updateQuery =
+    menuSelected === "PRODUCT"
+      ? `
+    UPDATE ${pickerTableName[menuSelected]} 
+    SET NAME = ? 
+    WHERE NAME = ?  AND ASSET = ?
+  `
+      : `
     UPDATE ${pickerTableName[menuSelected]} 
     SET NAME = ? 
     WHERE NAME = ?
@@ -1462,34 +1558,75 @@ app.post("/editPicker", authenticateToken, (req, res) => {
       return res.status(500).json({ error: "Failed to start transaction" });
     }
 
-    // Check if the new picker name already exists in the table
-    connection.query(checkPickerExistsQuery, [newPicker], (err, results) => {
-      connection.release();
-      if (err) {
-        return res.status(500).json({ error: "Failed to check picker name" });
-      }
+    if (menuSelected === "PRODUCT") {
+      connection.query(
+        checkPickerExistsQuery,
+        [newPicker, selectedAssets],
+        (err, results) => {
+          connection.release();
+          if (err) {
+            return res
+              .status(500)
+              .json({ error: "Failed to check picker name" });
+          }
 
-      if (results.length > 0) {
-        return res
-          .status(400)
-          .json({ error: "New picker name already exists" });
-      }
+          if (results.length > 0) {
+            return res
+              .status(400)
+              .json({ error: "New picker name already exists" });
+          }
 
-      // Perform the update
-      connection.query(updateQuery, [newPicker, oldPicker], (err, result) => {
+          // Perform the update
+          connection.query(
+            updateQuery,
+            [newPicker, oldPicker, selectedAssets],
+            (err, result) => {
+              if (err) {
+                return res
+                  .status(500)
+                  .json({ error: "Failed to update picker name" });
+              }
+
+              if (result.affectedRows === 0) {
+                return res
+                  .status(404)
+                  .json({ error: "Old picker name not found" });
+              }
+
+              res.json({ message: "Picker name updated successfully" });
+            }
+          );
+        }
+      );
+    } else {
+      connection.query(checkPickerExistsQuery, [newPicker], (err, results) => {
+        connection.release();
         if (err) {
+          return res.status(500).json({ error: "Failed to check picker name" });
+        }
+
+        if (results.length > 0) {
           return res
-            .status(500)
-            .json({ error: "Failed to update picker name" });
+            .status(400)
+            .json({ error: "New picker name already exists" });
         }
 
-        if (result.affectedRows === 0) {
-          return res.status(404).json({ error: "Old picker name not found" });
-        }
+        // Perform the update
+        connection.query(updateQuery, [newPicker, oldPicker], (err, result) => {
+          if (err) {
+            return res
+              .status(500)
+              .json({ error: "Failed to update picker name" });
+          }
 
-        res.json({ message: "Picker name updated successfully" });
+          if (result.affectedRows === 0) {
+            return res.status(404).json({ error: "Old picker name not found" });
+          }
+
+          res.json({ message: "Picker name updated successfully" });
+        });
       });
-    });
+    }
   });
 });
 
@@ -1689,7 +1826,7 @@ app.post("/deleteJob", authenticateToken, async (req, res) => {
 });
 
 app.post("/deletePicker", authenticateToken, async (req, res) => {
-  const { menuSelected, pickerName, position } = req.body;
+  const { menuSelected, pickerName, position, selectedAssets } = req.body;
 
   // Validate admin access
   if (position !== "ADMIN") {
@@ -1707,7 +1844,10 @@ app.post("/deletePicker", authenticateToken, async (req, res) => {
 
   try {
     // Prepare the delete query
-    const deleteQuery = `DELETE FROM ${pickerTableName[menuSelected]} WHERE NAME = ?`;
+    const deleteQuery =
+      menuSelected === "PRODUCT"
+        ? `DELETE FROM ${pickerTableName[menuSelected]} WHERE NAME = ? AND ASSET = ?`
+        : `DELETE FROM ${pickerTableName[menuSelected]} WHERE NAME = ?`;
 
     // Execute the delete query
     db.getConnection((err, connection) => {
@@ -1715,22 +1855,46 @@ app.post("/deletePicker", authenticateToken, async (req, res) => {
         console.error("Error getting connection:", err);
         return res.status(500).json({ message: "Error deleting picker" });
       }
-      connection.query(deleteQuery, [pickerName], (err, result) => {
-        connection.release();
-        if (err) {
-          console.error("Error deleting user:", err);
-          return res.status(500).json({ message: "Error deleting picker" });
-        }
 
-        // Check if any rows were affected
-        if (result.affectedRows === 0) {
-          return res.status(404).json({ message: "picker not found" });
-        }
+      if (menuSelected === "PRODUCT") {
+        connection.query(
+          deleteQuery,
+          [pickerName, selectedAssets],
+          (err, result) => {
+            connection.release();
+            if (err) {
+              console.error("Error deleting user:", err);
+              return res.status(500).json({ message: "Error deleting picker" });
+            }
 
-        res
-          .status(200)
-          .json({ message: `Picker '${pickerName}' deleted successfully.` });
-      });
+            // Check if any rows were affected
+            if (result.affectedRows === 0) {
+              return res.status(404).json({ message: "picker not found" });
+            }
+
+            res.status(200).json({
+              message: `Picker '${pickerName}' deleted successfully.`,
+            });
+          }
+        );
+      } else {
+        connection.query(deleteQuery, [pickerName], (err, result) => {
+          connection.release();
+          if (err) {
+            console.error("Error deleting user:", err);
+            return res.status(500).json({ message: "Error deleting picker" });
+          }
+
+          // Check if any rows were affected
+          if (result.affectedRows === 0) {
+            return res.status(404).json({ message: "picker not found" });
+          }
+
+          res
+            .status(200)
+            .json({ message: `Picker '${pickerName}' deleted successfully.` });
+        });
+      }
     });
   } catch (error) {
     console.error("Unexpected error:", error);
