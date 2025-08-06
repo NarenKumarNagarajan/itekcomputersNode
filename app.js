@@ -1,3 +1,5 @@
+process.env.TZ = process.env.TZ || "Asia/Kolkata";
+
 import cors from "cors";
 import dotenv from "dotenv";
 import mysql2 from "mysql2";
@@ -95,20 +97,6 @@ const covertDateFormate = (dateInput) => {
     console.error("Error in covertDateFormate:", error.message);
     throw new Error("Invalid date input");
   }
-};
-
-const updateTimeToNow = (originalDateStr) => {
-  // Parse original date from DB (e.g., '2025-08-04 15:44:00')
-  const originalDate = new Date(originalDateStr);
-  if (!isValid(originalDate)) return "";
-
-  const now = new Date();
-
-  // Replace time with current time
-  originalDate.setHours(now.getHours(), now.getMinutes(), 0, 0);
-
-  // Format as "dd/MM/yyyy hh:mm a"
-  return format(originalDate, "dd/MM/yyyy hh:mm a");
 };
 
 // Add rate limiting (e.g., 100 requests per 15 minutes per IP)
@@ -393,7 +381,7 @@ app.get("/printData", authenticateToken, (req, res) => {
       const formattedResults = results.map((result) => ({
         ...result,
         IN_DATE: covertDateFormate(result.IN_DATE),
-        OUT_DATE: updateTimeToNow(result.OUT_DATE),
+        OUT_DATE: covertDateFormate(result.OUT_DATE),
       }));
 
       res.json(formattedResults);

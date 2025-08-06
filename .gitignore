@@ -3,3 +3,4 @@ node_modules/
 
 # Ignore environment variable file
 .env
+.envproduction
